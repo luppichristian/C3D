@@ -1,0 +1,44 @@
+build/
+dist/
+gen/
+
+# bbs local overrides
+config.bbs
+toolchain.bbs
+
+# CMake-generated files
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+CTestTestfile.cmake
+cmake_install.cmake
+compile_commands.json
+install_manifest.txt
+
+# Visual Studio and IDE state
+.vs/
+.vscode/
+.idea/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+
+# Native build outputs
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.dylib
+*.so
+*.exe
+*.exp
+*.ilk
+*.out
+*.pdb
+
+# Logs and OS metadata
+*.log
+Thumbs.db
+.DS_Store
