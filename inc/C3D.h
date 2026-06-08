@@ -51,7 +51,11 @@ typedef enum {
 } C3DErrorID;
 
 C3D_API void _c3dThrowError(C3DErrorID id, const char* desc, C3DErrorLoc loc);
-#define c3dThrowError(id, desc) _c3dThrowError(id, desc, C3DErrorLoc {__FILE__, __FUNCTION__, __LINE__})
+#ifdef __cplusplus
+#  define c3dThrowError(id, desc) _c3dThrowError(id, desc, C3DErrorLoc {__FILE__, __FUNCTION__, __LINE__})
+#else
+#  define c3dThrowError(id, desc) _c3dThrowError(id, desc, (C3DErrorLoc) {__FILE__, __FUNCTION__, __LINE__})
+#endif
 
 C3D_API C3DErrorID c3dGetErrorID(void);
 C3D_API const char* c3dGetErrorDesc(void);

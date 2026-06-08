@@ -1,15 +1,14 @@
 #include <C3D.h>
 
+#include "c3d_internal.h"
+
 #include <cuda_runtime.h>
 
+#include <stdio.h>
 #include <stdint.h>
 #include <string.h>
 
-struct C3DTexture {
-  C3DTextureInfo info;
-  void* data;
-  size_t size;
-};
+static thread_local char g_cuda_error_desc[512];
 
 static size_t c3dGetFormatSize(C3DTextureFormat format) {
   switch (format) {
@@ -27,10 +26,12 @@ static bool c3dTryGetTextureSize(const C3DTextureInfo* info, size_t* size) {
     return false;
   }
 
-  if (info->width == 0 || info->height == 0 || info->depth == 0) {
-    c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "texture dimensions must be greater than zero");
+  if (info->width == 0 || info->height == 0) {
+    c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "texture width and height must be greater than zero");
     return false;
   }
+
+  size_t depth = info->depth == 0 ? 1 : info->depth;
 
   size_t format_size = c3dGetFormatSize(info->format);
   if (format_size == 0) {
@@ -44,8 +45,8 @@ static bool c3dTryGetTextureSize(const C3DTextureInfo* info, size_t* size) {
     return false;
   }
 
-  size_t volume_size = plane_size * info->depth;
-  if (volume_size / plane_size != info->depth) {
+  size_t volume_size = plane_size * depth;
+  if (volume_size / plane_size != depth) {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "texture dimensions overflow size_t");
     return false;
   }
@@ -58,6 +59,14 @@ static bool c3dTryGetTextureSize(const C3DTextureInfo* info, size_t* size) {
 
   *size = total_size;
   return true;
+}
+
+static C3DTextureInfo c3dNormalizeTextureInfo(C3DTextureInfo info) {
+  if (info.depth == 0) {
+    info.depth = 1;
+  }
+
+  return info;
 }
 
 static bool c3dCheckTextureRange(C3DTexture* texture, size_t offset, size_t size, void* buffer, const char* operation) {
@@ -84,12 +93,13 @@ static bool c3dCheckCUDA(cudaError_t error, const char* desc) {
     return true;
   }
 
-  c3dThrowError(C3D_ERROR_CUDA, desc);
+  snprintf(g_cuda_error_desc, sizeof(g_cuda_error_desc), "%s: %s (%d)", desc, cudaGetErrorString(error), (int)error);
+  c3dThrowError(C3D_ERROR_CUDA, g_cuda_error_desc);
   return false;
 }
 
 static __global__ void c3dFillTextureKernel(uint32_t* pixels, size_t count, uint32_t value) {
-  size_t index = (blockIdx.x * blockDim.x) + threadIdx.x;
+  size_t index = ((size_t)blockIdx.x * (size_t)blockDim.x) + (size_t)threadIdx.x;
   if (index < count) {
     pixels[index] = value;
   }
@@ -128,13 +138,15 @@ C3D_API C3DTexture* c3dCreateTexture(const C3DTextureInfo* info) {
     return nullptr;
   }
 
+  C3DTextureInfo normalized_info = c3dNormalizeTextureInfo(*info);
+
   C3DTexture* texture = new C3DTexture {};
   if (!texture) {
     c3dThrowError(C3D_ERROR_OUT_OF_MEMORY, "failed to allocate texture object");
     return nullptr;
   }
 
-  texture->info = *info;
+  texture->info = normalized_info;
   texture->size = size;
 
   if (!c3dCheckCUDA(cudaMalloc(&texture->data, texture->size), "cudaMalloc failed while creating texture")) {
@@ -194,12 +206,11 @@ C3D_API bool c3dFillTexture(C3DTexture* texture, size_t offset, size_t size, voi
     return true;
   }
 
-  int threads_per_block = 256;
-  int block_count = (int)((texel_count + (size_t)threads_per_block - 1) / (size_t)threads_per_block);
+  const int threads_per_block = 256;
+  const int block_count = (int)((texel_count + (size_t)threads_per_block - 1) / (size_t)threads_per_block);
   uint32_t* destination = static_cast<uint32_t*>(texture->data) + texel_offset;
   c3dFillTextureKernel<<<block_count, threads_per_block>>>(destination, texel_count, value);
-
-  return c3dCheckCUDA(cudaGetLastError(), "texture fill kernel launch failed")
+  return c3dCheckCUDA(cudaPeekAtLastError(), "texture fill kernel launch failed")
       && c3dCheckCUDA(cudaDeviceSynchronize(), "texture fill kernel execution failed");
 }
 
@@ -219,5 +230,50 @@ C3D_API bool c3dGetTextureInfo(C3DTexture* texture, C3DTextureInfo* info) {
   }
 
   *info = texture->info;
+  return true;
+}
+
+C3D_API bool c3dResizeTexture(C3DTexture* texture, size_t width, size_t height, size_t depth) {
+  if (!texture) {
+    c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "texture must be non-null");
+    return false;
+  }
+
+  C3DTextureInfo info = texture->info;
+  info.width = width;
+  info.height = height;
+  info.depth = depth;
+
+  size_t new_size = 0;
+  if (!c3dTryGetTextureSize(&info, &new_size)) {
+    return false;
+  }
+
+  info = c3dNormalizeTextureInfo(info);
+
+  void* new_data = nullptr;
+  if (!c3dCheckCUDA(cudaMalloc(&new_data, new_size), "cudaMalloc failed while resizing texture")) {
+    return false;
+  }
+
+  size_t copy_size = texture->size < new_size ? texture->size : new_size;
+  bool success = true;
+  if (copy_size != 0) {
+    success = c3dCheckCUDA(cudaMemcpy(new_data, texture->data, copy_size, cudaMemcpyDeviceToDevice), "cudaMemcpy failed while resizing texture");
+  }
+
+  if (!success) {
+    cudaFree(new_data);
+    return false;
+  }
+
+  if (!c3dCheckCUDA(cudaFree(texture->data), "cudaFree failed while replacing texture storage during resize")) {
+    cudaFree(new_data);
+    return false;
+  }
+
+  texture->data = new_data;
+  texture->size = new_size;
+  texture->info = info;
   return true;
 }

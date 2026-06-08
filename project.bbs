@@ -8,6 +8,7 @@ targets(
   dyn_lib(
     id(c3d_lib)
     lang(cuda)
+    cuda_architectures("75" "89")
     include_dirs(inc)
     units(src/*.cu)
     defines(C3D_EXPORT_LIB)
