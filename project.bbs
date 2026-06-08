@@ -9,11 +9,11 @@ targets(
     id(c3d_lib)
     lang(cuda)
     include_dirs(inc)
-    units(src/main.cu)
+    units(src/*.cu)
     defines(C3D_EXPORT_LIB)
   )
 
-  console(
+  consoleless(
     id(c3d_test)
     lang(c)
     include_dirs(inc)
