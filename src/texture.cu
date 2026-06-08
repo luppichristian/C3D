@@ -2,6 +2,9 @@
 
 #include <cuda_runtime.h>
 
+#include <stdint.h>
+#include <string.h>
+
 struct C3DTexture {
   C3DTextureInfo info;
   void* data;
@@ -85,6 +88,40 @@ static bool c3dCheckCUDA(cudaError_t error, const char* desc) {
   return false;
 }
 
+static __global__ void c3dFillTextureKernel(uint32_t* pixels, size_t count, uint32_t value) {
+  size_t index = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (index < count) {
+    pixels[index] = value;
+  }
+}
+
+static bool c3dTryGetFillTextureArgs(C3DTexture* texture, size_t offset, size_t size, void* texel, uint32_t* value, size_t* texel_offset, size_t* texel_count) {
+  if (!c3dCheckTextureRange(texture, offset, size, texel, "texture fill range is out of bounds")) {
+    return false;
+  }
+
+  if (size == 0) {
+    *texel_count = 0;
+    return true;
+  }
+
+  size_t format_size = c3dGetFormatSize(texture->info.format);
+  if (format_size != sizeof(uint32_t)) {
+    c3dThrowError(C3D_ERROR_UNSUPPORTED_FORMAT, "texture fill only supports 32-bit texel formats");
+    return false;
+  }
+
+  if ((offset % format_size) != 0 || (size % format_size) != 0) {
+    c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "texture fill offset and size must be texel-aligned");
+    return false;
+  }
+
+  memcpy(value, texel, sizeof(*value));
+  *texel_offset = offset / format_size;
+  *texel_count = size / format_size;
+  return true;
+}
+
 C3D_API C3DTexture* c3dCreateTexture(const C3DTextureInfo* info) {
   size_t size = 0;
   if (!c3dTryGetTextureSize(info, &size)) {
@@ -143,6 +180,36 @@ C3D_API bool c3dWriteTexture(C3DTexture* texture, size_t offset, size_t size, vo
 
   char* destination = static_cast<char*>(texture->data) + offset;
   return c3dCheckCUDA(cudaMemcpy(destination, buffer, size, cudaMemcpyHostToDevice), "cudaMemcpy failed while writing texture");
+}
+
+C3D_API bool c3dFillTexture(C3DTexture* texture, size_t offset, size_t size, void* texel) {
+  uint32_t value = 0;
+  size_t texel_offset = 0;
+  size_t texel_count = 0;
+  if (!c3dTryGetFillTextureArgs(texture, offset, size, texel, &value, &texel_offset, &texel_count)) {
+    return false;
+  }
+
+  if (texel_count == 0) {
+    return true;
+  }
+
+  int threads_per_block = 256;
+  int block_count = (int)((texel_count + (size_t)threads_per_block - 1) / (size_t)threads_per_block);
+  uint32_t* destination = static_cast<uint32_t*>(texture->data) + texel_offset;
+  c3dFillTextureKernel<<<block_count, threads_per_block>>>(destination, texel_count, value);
+
+  return c3dCheckCUDA(cudaGetLastError(), "texture fill kernel launch failed")
+      && c3dCheckCUDA(cudaDeviceSynchronize(), "texture fill kernel execution failed");
+}
+
+C3D_API bool c3dClearTexture(C3DTexture* texture, void* texel) {
+  if (!texture) {
+    c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "texture must be non-null");
+    return false;
+  }
+
+  return c3dFillTexture(texture, 0, texture->size, texel);
 }
 
 C3D_API bool c3dGetTextureInfo(C3DTexture* texture, C3DTextureInfo* info) {
