@@ -73,6 +73,35 @@ C3D_API void c3dSetErrorCallback(C3DErrorCallback* callback);
 C3D_API C3DErrorCallback* c3dGetErrorCallback(void);
 
 //
+// Stage buffer
+//
+
+typedef struct
+{
+  const void* initBuffer;
+  size_t initSize;
+  size_t size;
+} C3DStageBufferInfo;
+
+typedef enum
+{
+  C3D_MEMORY_ACCESS_READ,
+  C3D_MEMORY_ACCESS_WRITE,
+  C3D_MEMORY_ACCESS_READ_WRITE,
+} C3DMemoryAccess;
+
+typedef struct C3DStageBuffer C3DStageBuffer;
+
+C3D_API C3DStageBuffer* c3dCreateStageBuffer(const C3DStageBufferInfo* info);
+C3D_API bool c3dDeleteStageBuffer(C3DStageBuffer* stageBuffer);
+C3D_API bool c3dResizeStageBuffer(C3DStageBuffer* stageBuffer, size_t size);
+C3D_API bool c3dGetStageBufferInfo(C3DStageBuffer* stageBuffer, C3DStageBufferInfo* info);
+C3D_API bool c3dReadStageBuffer(C3DStageBuffer* stageBuffer, size_t offset, size_t size, void* buffer);
+C3D_API bool c3dWriteStageBuffer(C3DStageBuffer* stageBuffer, size_t offset, size_t size, const void* buffer);
+C3D_API void* c3dMapStageBuffer(C3DStageBuffer* stageBuffer, C3DMemoryAccess access);
+C3D_API bool c3dUnmapStageBuffer(C3DStageBuffer* stageBuffer);
+
+//
 // Textures
 //
 
@@ -80,6 +109,7 @@ typedef enum
 {
   C3D_TEXTURE_FORMAT_RGBA8,
   C3D_TEXTURE_FORMAT_BGRA8,
+  C3D_TEXTURE_FORMAT_DEPTH64,
 } C3DTextureFormat;
 
 typedef struct
@@ -94,15 +124,15 @@ typedef struct C3DTexture C3DTexture;
 
 C3D_API C3DTexture* c3dCreateTexture(const C3DTextureInfo* info);
 C3D_API bool c3dDeleteTexture(C3DTexture* texture);
-C3D_API bool c3dReadTexture(C3DTexture* texture, size_t offset, size_t size, void* buffer);
-C3D_API bool c3dWriteTexture(C3DTexture* texture, size_t offset, size_t size, void* buffer);
+C3D_API bool c3dReadTexture(C3DTexture* texture, size_t textureOffset, size_t size, C3DStageBuffer* stageBuffer, size_t stageOffset);
+C3D_API bool c3dWriteTexture(C3DTexture* texture, size_t textureOffset, size_t size, C3DStageBuffer* stageBuffer, size_t stageOffset);
 C3D_API bool c3dFillTexture(C3DTexture* texture, size_t offset, size_t size, void* texel);
 C3D_API bool c3dClearTexture(C3DTexture* texture, void* texel);
 C3D_API bool c3dGetTextureInfo(C3DTexture* texture, C3DTextureInfo* info);
 C3D_API bool c3dResizeTexture(C3DTexture* texture, size_t width, size_t height, size_t depth);
 
 //
-// Index buffer
+// Buffers
 //
 
 typedef enum
@@ -114,23 +144,21 @@ typedef enum
 
 typedef struct
 {
-  C3DIndexSize indexSize;
-  size_t indexCap;
-} C3DIndexBufferInfo;
+  size_t size;
+} C3DBufferInfo;
 
-typedef struct C3DIndexBuffer C3DIndexBuffer;
+typedef struct C3DBuffer C3DBuffer;
 
-C3D_API C3DIndexBuffer* c3dCreateIndexBuffer(const C3DIndexBufferInfo* info);
-C3D_API bool c3dDeleteIndexBuffer(C3DIndexBuffer* indexBuffer);
-C3D_API bool c3dResizeIndexBuffer(C3DIndexBuffer* indexBuffer, size_t indexCap);
-C3D_API bool c3dGetIndexBufferInfo(C3DIndexBuffer* indexBuffer, C3DIndexBufferInfo* info);
-C3D_API bool c3dReadIndexBuffer(C3DIndexBuffer* indexBuffer, size_t offset, size_t size, void* buffer);
-C3D_API bool c3dWriteIndexBuffer(C3DIndexBuffer* indexBuffer, size_t offset, size_t size, void* buffer);
-C3D_API bool c3dFillIndexBuffer(C3DIndexBuffer* indexBuffer, size_t offset, size_t size, void* idx);
-C3D_API bool c3dClearIndexBuffer(C3DIndexBuffer* indexBuffer, void* idx);
+C3D_API C3DBuffer* c3dCreateBuffer(const C3DBufferInfo* info);
+C3D_API bool c3dDeleteBuffer(C3DBuffer* buffer);
+C3D_API bool c3dResizeBuffer(C3DBuffer* buffer, size_t size);
+C3D_API bool c3dGetBufferInfo(C3DBuffer* buffer, C3DBufferInfo* info);
+C3D_API bool c3dReadBuffer(C3DBuffer* buffer, size_t bufferOffset, size_t size, C3DStageBuffer* stageBuffer, size_t stageOffset);
+C3D_API bool c3dWriteBuffer(C3DBuffer* buffer, size_t bufferOffset, size_t size, C3DStageBuffer* stageBuffer, size_t stageOffset);
+C3D_API bool c3dBufferCopy(C3DBuffer* destination, size_t destinationOffset, C3DBuffer* source, size_t sourceOffset, size_t size);
 
 //
-// Vertex buffer
+// Vertex layout
 //
 
 typedef struct
@@ -140,22 +168,6 @@ typedef struct
   float uv[2];
   int texid;
 } C3DVertex;
-
-typedef struct
-{
-  size_t vertexCap;
-} C3DVertexBufferInfo;
-
-typedef struct C3DVertexBuffer C3DVertexBuffer;
-
-C3D_API C3DVertexBuffer* c3dCreateVertexBuffer(const C3DVertexBufferInfo* info);
-C3D_API bool c3dDeleteVertexBuffer(C3DVertexBuffer* vertexBuffer);
-C3D_API bool c3dResizeVertexBuffer(C3DVertexBuffer* vertexBuffer, size_t indexCap);
-C3D_API bool c3dGetVertexBufferInfo(C3DVertexBuffer* vertexBuffer, C3DVertexBufferInfo* info);
-C3D_API bool c3dReadVertexBuffer(C3DVertexBuffer* vertexBuffer, size_t offset, size_t size, void* buffer);
-C3D_API bool c3dWriteVertexBuffer(C3DVertexBuffer* vertexBuffer, size_t offset, size_t size, void* buffer);
-C3D_API bool c3dFillVertexBuffer(C3DVertexBuffer* vertexBuffer, size_t offset, size_t size, void* idx);
-C3D_API bool c3dClearVertexBuffer(C3DVertexBuffer* vertexBuffer, void* idx);
 
 //
 // Command buffer
@@ -191,11 +203,20 @@ typedef struct
 
 typedef struct
 {
+  size_t x;
+  size_t y;
+  size_t width;
+  size_t height;
+} C3DViewport;
+
+typedef struct
+{
   C3DTopology topology;
-  C3DIndexBuffer* indexBuffer;
+  C3DBuffer* indexBuffer;
+  C3DIndexSize indexSize;
   size_t indexOffset;
   size_t indexBase;
-  C3DVertexBuffer* vertexBuffer;
+  C3DBuffer* vertexBuffer;
   size_t vertexOffset;
   size_t count;
 } C3DDrawInfo;
@@ -203,6 +224,8 @@ typedef struct
 typedef struct
 {
   C3DTexture* target;
+  C3DTexture* depthTarget;
+  C3DViewport viewport;
   C3DBlendMode targetBlend;
   C3DTextureBinding* textureBindings;
   size_t textureBindCount;

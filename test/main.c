@@ -11,10 +11,14 @@ typedef struct
 {
   bool initialized;
   C3DTexture* texture;
-  C3DIndexBuffer* quad_indices;
-  C3DVertexBuffer* quad_vertices;
-  C3DIndexBuffer* line_indices;
-  C3DVertexBuffer* line_vertices;
+  C3DTexture* depth_texture;
+  C3DBuffer* quad_indices;
+  C3DBuffer* quad_vertices;
+  C3DBuffer* line_indices;
+  C3DBuffer* line_vertices;
+  C3DStageBuffer* quad_upload_stage;
+  C3DStageBuffer* line_upload_stage;
+  C3DStageBuffer* readback_stage;
   C3DCommandBuffer* command_buffer;
 } RenderState;
 
@@ -47,6 +51,47 @@ static void clearFallback(C3DTexture* texture, uint8_t r, uint8_t g, uint8_t b)
   c3dClearTexture(texture, clear_color);
 }
 
+static bool ensureStageBufferSize(C3DStageBuffer** stage_buffer, size_t size)
+{
+  if (!*stage_buffer)
+  {
+    C3DStageBufferInfo info = {0};
+    info.size = size;
+    *stage_buffer = c3dCreateStageBuffer(&info);
+    return *stage_buffer != NULL;
+  }
+
+  C3DStageBufferInfo info = {0};
+  if (!c3dGetStageBufferInfo(*stage_buffer, &info))
+  {
+    return false;
+  }
+
+  return info.size == size || c3dResizeStageBuffer(*stage_buffer, size);
+}
+
+static bool ensureDepthTexture(size_t width, size_t height)
+{
+  C3DTextureInfo info = {0};
+  if (g_render_state.depth_texture && c3dGetTextureInfo(g_render_state.depth_texture, &info) && info.width == width && info.height == height && info.format == C3D_TEXTURE_FORMAT_DEPTH64)
+  {
+    return true;
+  }
+
+  if (g_render_state.depth_texture)
+  {
+    c3dDeleteTexture(g_render_state.depth_texture);
+    g_render_state.depth_texture = NULL;
+  }
+
+  info.width = width;
+  info.height = height;
+  info.depth = 1;
+  info.format = C3D_TEXTURE_FORMAT_DEPTH64;
+  g_render_state.depth_texture = c3dCreateTexture(&info);
+  return g_render_state.depth_texture != NULL;
+}
+
 static void destroyRenderState(void)
 {
   if (g_render_state.command_buffer)
@@ -55,28 +100,52 @@ static void destroyRenderState(void)
     g_render_state.command_buffer = NULL;
   }
 
+  if (g_render_state.readback_stage)
+  {
+    c3dDeleteStageBuffer(g_render_state.readback_stage);
+    g_render_state.readback_stage = NULL;
+  }
+
+  if (g_render_state.line_upload_stage)
+  {
+    c3dDeleteStageBuffer(g_render_state.line_upload_stage);
+    g_render_state.line_upload_stage = NULL;
+  }
+
+  if (g_render_state.quad_upload_stage)
+  {
+    c3dDeleteStageBuffer(g_render_state.quad_upload_stage);
+    g_render_state.quad_upload_stage = NULL;
+  }
+
   if (g_render_state.line_vertices)
   {
-    c3dDeleteVertexBuffer(g_render_state.line_vertices);
+    c3dDeleteBuffer(g_render_state.line_vertices);
     g_render_state.line_vertices = NULL;
   }
 
   if (g_render_state.line_indices)
   {
-    c3dDeleteIndexBuffer(g_render_state.line_indices);
+    c3dDeleteBuffer(g_render_state.line_indices);
     g_render_state.line_indices = NULL;
   }
 
   if (g_render_state.quad_vertices)
   {
-    c3dDeleteVertexBuffer(g_render_state.quad_vertices);
+    c3dDeleteBuffer(g_render_state.quad_vertices);
     g_render_state.quad_vertices = NULL;
   }
 
   if (g_render_state.quad_indices)
   {
-    c3dDeleteIndexBuffer(g_render_state.quad_indices);
+    c3dDeleteBuffer(g_render_state.quad_indices);
     g_render_state.quad_indices = NULL;
+  }
+
+  if (g_render_state.depth_texture)
+  {
+    c3dDeleteTexture(g_render_state.depth_texture);
+    g_render_state.depth_texture = NULL;
   }
 
   if (g_render_state.texture)
@@ -115,52 +184,80 @@ static bool createCheckerTexture(void)
     }
   }
 
-  return c3dWriteTexture(g_render_state.texture, 0, sizeof(pixels), pixels);
+  C3DStageBufferInfo stage_info = {0};
+  stage_info.size = sizeof(pixels);
+  C3DStageBuffer* stage_buffer = c3dCreateStageBuffer(&stage_info);
+  if (!stage_buffer)
+  {
+    return false;
+  }
+
+  bool success = c3dWriteStageBuffer(stage_buffer, 0, sizeof(pixels), pixels) && c3dWriteTexture(g_render_state.texture, 0, sizeof(pixels), stage_buffer, 0);
+  c3dDeleteStageBuffer(stage_buffer);
+  return success;
 }
 
 static bool createQuadBuffers(void)
 {
   static const uint16_t quad_indices[] = {0, 1, 2, 3};
-  C3DIndexBufferInfo index_info = {0};
-  index_info.indexSize = C3D_INDEX_SIZE_16;
-  index_info.indexCap = 4;
-  g_render_state.quad_indices = c3dCreateIndexBuffer(&index_info);
+  C3DBufferInfo index_info = {0};
+  index_info.size = sizeof(quad_indices);
+  g_render_state.quad_indices = c3dCreateBuffer(&index_info);
   if (!g_render_state.quad_indices)
   {
     return false;
   }
 
-  if (!c3dWriteIndexBuffer(g_render_state.quad_indices, 0, sizeof(quad_indices), (void*)quad_indices))
+  C3DStageBufferInfo stage_info = {0};
+  stage_info.size = sizeof(quad_indices);
+  C3DStageBuffer* stage_buffer = c3dCreateStageBuffer(&stage_info);
+  if (!stage_buffer)
   {
     return false;
   }
 
-  C3DVertexBufferInfo vertex_info = {0};
-  vertex_info.vertexCap = 4;
-  g_render_state.quad_vertices = c3dCreateVertexBuffer(&vertex_info);
+  bool success = c3dWriteStageBuffer(stage_buffer, 0, sizeof(quad_indices), quad_indices) && c3dWriteBuffer(g_render_state.quad_indices, 0, sizeof(quad_indices), stage_buffer, 0);
+  c3dDeleteStageBuffer(stage_buffer);
+  if (!success)
+  {
+    return false;
+  }
+
+  C3DBufferInfo vertex_info = {0};
+  vertex_info.size = sizeof(C3DVertex) * 4;
+  g_render_state.quad_vertices = c3dCreateBuffer(&vertex_info);
   return g_render_state.quad_vertices != NULL;
 }
 
 static bool createLineBuffers(void)
 {
   static const uint16_t line_indices[] = {0, 1, 2, 3};
-  C3DIndexBufferInfo index_info = {0};
-  index_info.indexSize = C3D_INDEX_SIZE_16;
-  index_info.indexCap = 4;
-  g_render_state.line_indices = c3dCreateIndexBuffer(&index_info);
+  C3DBufferInfo index_info = {0};
+  index_info.size = sizeof(line_indices);
+  g_render_state.line_indices = c3dCreateBuffer(&index_info);
   if (!g_render_state.line_indices)
   {
     return false;
   }
 
-  if (!c3dWriteIndexBuffer(g_render_state.line_indices, 0, sizeof(line_indices), (void*)line_indices))
+  C3DStageBufferInfo stage_info = {0};
+  stage_info.size = sizeof(line_indices);
+  C3DStageBuffer* stage_buffer = c3dCreateStageBuffer(&stage_info);
+  if (!stage_buffer)
   {
     return false;
   }
 
-  C3DVertexBufferInfo vertex_info = {0};
-  vertex_info.vertexCap = 4;
-  g_render_state.line_vertices = c3dCreateVertexBuffer(&vertex_info);
+  bool success = c3dWriteStageBuffer(stage_buffer, 0, sizeof(line_indices), line_indices) && c3dWriteBuffer(g_render_state.line_indices, 0, sizeof(line_indices), stage_buffer, 0);
+  c3dDeleteStageBuffer(stage_buffer);
+  if (!success)
+  {
+    return false;
+  }
+
+  C3DBufferInfo vertex_info = {0};
+  vertex_info.size = sizeof(C3DVertex) * 4;
+  g_render_state.line_vertices = c3dCreateBuffer(&vertex_info);
   return g_render_state.line_vertices != NULL;
 }
 
@@ -179,6 +276,12 @@ static bool initializeRenderState(void)
 
   g_render_state.command_buffer = c3dCreateCommandBuffer();
   if (!g_render_state.command_buffer)
+  {
+    destroyRenderState();
+    return false;
+  }
+
+  if (!ensureStageBufferSize(&g_render_state.quad_upload_stage, sizeof(C3DVertex) * 4) || !ensureStageBufferSize(&g_render_state.line_upload_stage, sizeof(C3DVertex) * 4))
   {
     destroyRenderState();
     return false;
@@ -211,6 +314,12 @@ static void render(C3DTexture* texture)
 
   C3DTextureInfo target_info = {0};
   if (!c3dGetTextureInfo(texture, &target_info))
+  {
+    clearFallback(texture, 255, 0, 255);
+    return;
+  }
+
+  if (!ensureDepthTexture(target_info.width, target_info.height))
   {
     clearFallback(texture, 255, 0, 255);
     return;
@@ -267,7 +376,17 @@ static void render(C3DTexture* texture)
     quad_vertices[i].texid = 0;
   }
 
-  if (!c3dWriteVertexBuffer(g_render_state.quad_vertices, 0, sizeof(quad_vertices), quad_vertices))
+  void* quad_stage_data = NULL;
+  quad_stage_data = c3dMapStageBuffer(g_render_state.quad_upload_stage, C3D_MEMORY_ACCESS_WRITE);
+  if (!quad_stage_data)
+  {
+    clearFallback(texture, 255, 32, 32);
+    return;
+  }
+  memcpy(quad_stage_data, quad_vertices, sizeof(quad_vertices));
+  c3dUnmapStageBuffer(g_render_state.quad_upload_stage);
+
+  if (!c3dWriteBuffer(g_render_state.quad_vertices, 0, sizeof(quad_vertices), g_render_state.quad_upload_stage, 0))
   {
     clearFallback(texture, 255, 32, 32);
     return;
@@ -296,7 +415,17 @@ static void render(C3DTexture* texture)
     line_vertices[i].texid = -1;
   }
 
-  if (!c3dWriteVertexBuffer(g_render_state.line_vertices, 0, sizeof(line_vertices), line_vertices))
+  void* line_stage_data = NULL;
+  line_stage_data = c3dMapStageBuffer(g_render_state.line_upload_stage, C3D_MEMORY_ACCESS_WRITE);
+  if (!line_stage_data)
+  {
+    clearFallback(texture, 255, 32, 32);
+    return;
+  }
+  memcpy(line_stage_data, line_vertices, sizeof(line_vertices));
+  c3dUnmapStageBuffer(g_render_state.line_upload_stage);
+
+  if (!c3dWriteBuffer(g_render_state.line_vertices, 0, sizeof(line_vertices), g_render_state.line_upload_stage, 0))
   {
     clearFallback(texture, 255, 32, 32);
     return;
@@ -308,6 +437,11 @@ static void render(C3DTexture* texture)
 
   C3DRenderPassInfo render_pass = {0};
   render_pass.target = texture;
+  render_pass.depthTarget = g_render_state.depth_texture;
+  render_pass.viewport.x = 0;
+  render_pass.viewport.y = 0;
+  render_pass.viewport.width = target_info.width;
+  render_pass.viewport.height = target_info.height;
   render_pass.targetBlend = C3D_BLEND_MODE_NORMAL;
   render_pass.textureBindings = &binding;
   render_pass.textureBindCount = 1;
@@ -320,6 +454,7 @@ static void render(C3DTexture* texture)
 
   C3DDrawInfo quad_draw = {0};
   quad_draw.topology = C3D_TOPOLOGY_QUAD;
+  quad_draw.indexSize = C3D_INDEX_SIZE_16;
   quad_draw.indexBuffer = g_render_state.quad_indices;
   quad_draw.indexOffset = 0;
   quad_draw.indexBase = 0;
@@ -336,6 +471,7 @@ static void render(C3DTexture* texture)
 
   C3DDrawInfo line_draw = {0};
   line_draw.topology = C3D_TOPOLOGY_LINE;
+  line_draw.indexSize = C3D_INDEX_SIZE_16;
   line_draw.indexBuffer = g_render_state.line_indices;
   line_draw.indexOffset = 0;
   line_draw.indexBase = 0;
@@ -441,8 +577,17 @@ static void presentToWindow(HWND window, C3DTexture* texture, const C3DTextureIn
   bitmap_info.masks[3] = 0xFF000000u;
 
   size_t size = info->width * info->height * 4;
-  void* buffer = malloc(size);
-  c3dReadTexture(texture, 0, size, buffer);
+  if (!ensureStageBufferSize(&g_render_state.readback_stage, size) || !c3dReadTexture(texture, 0, size, g_render_state.readback_stage, 0))
+  {
+    return;
+  }
+
+  void* buffer = NULL;
+  buffer = c3dMapStageBuffer(g_render_state.readback_stage, C3D_MEMORY_ACCESS_READ);
+  if (!buffer)
+  {
+    return;
+  }
 
   HDC device_context = GetDC(window);
   StretchDIBits(
@@ -460,7 +605,7 @@ static void presentToWindow(HWND window, C3DTexture* texture, const C3DTextureIn
       DIB_RGB_COLORS,
       SRCCOPY);
   ReleaseDC(window, device_context);
-  free(buffer);
+  c3dUnmapStageBuffer(g_render_state.readback_stage);
 }
 
 static void updateWindowTitle(HWND window, LARGE_INTEGER now, LARGE_INTEGER frequency)

@@ -1,29 +1,30 @@
 #pragma once
 
 #include <C3D.h>
+#include <cuda_runtime.h>
 #include <stdint.h>
+#include <stdio.h>
 
 struct C3DTexture
 {
   C3DTextureInfo info;
-  void* data;
+  uint8_t* data;
   size_t size;
 };
 
-struct C3DIndexBuffer
+struct C3DBuffer
 {
-  C3DIndexBufferInfo info;
-  uint8_t* data;
-  uint8_t* device_data;
-  size_t size;
+  C3DBufferInfo info;
+  uint8_t* hostData;
+  uint8_t* deviceData;
 };
 
-struct C3DVertexBuffer
+struct C3DStageBuffer
 {
-  C3DVertexBufferInfo info;
   uint8_t* data;
-  uint8_t* device_data;
-  size_t size;
+  C3DStageBufferInfo info;
+  bool mapped;
+  C3DMemoryAccess access;
 };
 
 struct C3DRecordedDraw
@@ -33,30 +34,30 @@ struct C3DRecordedDraw
 
 struct C3DCommandBuffer
 {
-  bool in_render_pass;
-  bool has_render_pass;
-  C3DRenderPassInfo render_pass;
+  bool inRenderPass;
+  bool hasRenderPass;
+  C3DRenderPassInfo renderPass;
   C3DRecordedDraw* draws;
-  size_t draw_count;
-  size_t draw_cap;
-  uint64_t* depth_buffer;
-  size_t depth_cap;
-  void* line_primitives;
-  size_t line_primitive_cap;
-  void* triangle_primitives;
-  size_t triangle_primitive_cap;
-  void* texture_views;
-  size_t texture_view_cap;
-  uint32_t* tile_counts_device;
-  uint32_t* tile_offsets_device;
-  uint32_t* tile_indices_device;
-  uint32_t* tile_counts_host;
-  uint32_t* tile_offsets_host;
-  size_t tile_count_cap;
-  size_t tile_offset_cap;
-  size_t tile_index_cap;
-  size_t tile_counts_host_cap;
-  size_t tile_offsets_host_cap;
+  size_t drawCount;
+  size_t drawCap;
+  uint64_t* depthBuffer;
+  size_t depthCap;
+  void* linePrimitives;
+  size_t linePrimitiveCap;
+  void* trianglePrimitives;
+  size_t trianglePrimitiveCap;
+  void* textureViews;
+  size_t textureViewCap;
+  uint32_t* tileCountsDevice;
+  uint32_t* tileOffsetsDevice;
+  uint32_t* tileIndicesDevice;
+  uint32_t* tileCountsHost;
+  uint32_t* tileOffsetsHost;
+  size_t tileCountCap;
+  size_t tileOffsetCap;
+  size_t tileIndexCap;
+  size_t tileCountsHostCap;
+  size_t tileOffsetsHostCap;
 };
 
 static bool c3dCheckCUDA(cudaError_t error, const char* desc)
@@ -68,3 +69,45 @@ static bool c3dCheckCUDA(cudaError_t error, const char* desc)
   c3dThrowError(C3D_ERROR_CUDA, buffer);
   return false;
 }
+
+static bool c3dCheckRange(size_t totalSize, size_t offset, size_t size, const char* desc)
+{
+  if (offset > totalSize || size > totalSize - offset)
+  {
+    c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, desc);
+    return false;
+  }
+
+  return true;
+}
+
+static __host__ __device__ size_t c3dGetTextureFormatSize(C3DTextureFormat format)
+{
+  switch (format)
+  {
+    case C3D_TEXTURE_FORMAT_RGBA8:
+    case C3D_TEXTURE_FORMAT_BGRA8:
+      return 4;
+    case C3D_TEXTURE_FORMAT_DEPTH64:
+      return sizeof(uint64_t);
+  }
+
+  return 0;
+}
+
+static __host__ __device__ size_t c3dGetIndexStride(C3DIndexSize indexSize)
+{
+  switch (indexSize)
+  {
+    case C3D_INDEX_SIZE_8:
+      return 1;
+    case C3D_INDEX_SIZE_16:
+      return 2;
+    case C3D_INDEX_SIZE_32:
+      return 4;
+  }
+
+  return 0;
+}
+
+void c3dResetCommandBuffer(C3DCommandBuffer* commandBuffer);

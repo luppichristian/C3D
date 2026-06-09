@@ -5,18 +5,6 @@
 #include <string.h>
 #include "c3d_internal.h"
 
-static size_t c3dGetFormatSize(C3DTextureFormat format)
-{
-  switch (format)
-  {
-    case C3D_TEXTURE_FORMAT_RGBA8:
-    case C3D_TEXTURE_FORMAT_BGRA8:
-      return 4;
-  }
-
-  return 0;
-}
-
 static bool c3dTryGetTextureSize(const C3DTextureInfo* info, size_t* size)
 {
   if (!info || !size)
@@ -33,7 +21,7 @@ static bool c3dTryGetTextureSize(const C3DTextureInfo* info, size_t* size)
 
   size_t depth = info->depth == 0 ? 1 : info->depth;
 
-  size_t formatSize = c3dGetFormatSize(info->format);
+  size_t formatSize = c3dGetTextureFormatSize(info->format);
   if (formatSize == 0)
   {
     c3dThrowError(C3D_ERROR_UNSUPPORTED_FORMAT, "texture format is not supported");
@@ -68,11 +56,14 @@ static bool c3dTryGetTextureSize(const C3DTextureInfo* info, size_t* size)
 static C3DTextureInfo c3dNormalizeTextureInfo(C3DTextureInfo info)
 {
   if (info.depth == 0)
+  {
     info.depth = 1;
+  }
+
   return info;
 }
 
-static bool c3dCheckTextureRange(C3DTexture* texture, size_t offset, size_t size, void* buffer, const char* operation)
+static bool c3dCheckTextureRange(C3DTexture* texture, size_t offset, size_t size, const char* desc)
 {
   if (!texture)
   {
@@ -80,19 +71,18 @@ static bool c3dCheckTextureRange(C3DTexture* texture, size_t offset, size_t size
     return false;
   }
 
-  if (!buffer && size != 0)
+  return c3dCheckRange(texture->size, offset, size, desc);
+}
+
+static bool c3dCheckStageRange(C3DStageBuffer* stageBuffer, size_t offset, size_t size, const char* desc)
+{
+  if (!stageBuffer)
   {
-    c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "buffer must be non-null when size is non-zero");
+    c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "stage buffer must be non-null");
     return false;
   }
 
-  if (offset > texture->size || size > texture->size - offset)
-  {
-    c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, operation);
-    return false;
-  }
-
-  return true;
+  return c3dCheckRange(stageBuffer->info.size, offset, size, desc);
 }
 
 static __global__ void c3dFillTextureKernel(uint32_t* pixels, size_t count, uint32_t value)
@@ -104,10 +94,25 @@ static __global__ void c3dFillTextureKernel(uint32_t* pixels, size_t count, uint
   }
 }
 
-static bool c3dTryGetFillTextureArgs(C3DTexture* texture, size_t offset, size_t size, void* texel, uint32_t* value, size_t* texelOffset, size_t* texelCount)
+static bool c3dTryGetFillTextureArgs(
+    C3DTexture* texture,
+    size_t offset,
+    size_t size,
+    void* texel,
+    uint32_t* value,
+    size_t* texelOffset,
+    size_t* texelCount)
 {
-  if (!c3dCheckTextureRange(texture, offset, size, texel, "texture fill range is out of bounds"))
+  if (!texel && size != 0)
+  {
+    c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "texel must be non-null when size is non-zero");
     return false;
+  }
+
+  if (!c3dCheckTextureRange(texture, offset, size, "texture fill range is out of bounds"))
+  {
+    return false;
+  }
 
   if (size == 0)
   {
@@ -115,7 +120,7 @@ static bool c3dTryGetFillTextureArgs(C3DTexture* texture, size_t offset, size_t 
     return true;
   }
 
-  size_t formatSize = c3dGetFormatSize(texture->info.format);
+  size_t formatSize = c3dGetTextureFormatSize(texture->info.format);
   if (formatSize != sizeof(uint32_t))
   {
     c3dThrowError(C3D_ERROR_UNSUPPORTED_FORMAT, "texture fill only supports 32-bit texel formats");
@@ -138,7 +143,9 @@ C3D_API C3DTexture* c3dCreateTexture(const C3DTextureInfo* info)
 {
   size_t size = 0;
   if (!c3dTryGetTextureSize(info, &size))
+  {
     return nullptr;
+  }
 
   C3DTextureInfo normalizedInfo = c3dNormalizeTextureInfo(*info);
   C3DTexture* texture = (C3DTexture*)malloc(sizeof(C3DTexture));
@@ -152,7 +159,7 @@ C3D_API C3DTexture* c3dCreateTexture(const C3DTextureInfo* info)
   texture->info = normalizedInfo;
   texture->size = size;
 
-  if (!c3dCheckCUDA(cudaMalloc(&texture->data, texture->size), "cudaMalloc failed while creating texture"))
+  if (!c3dCheckCUDA(cudaMalloc((void**)&texture->data, texture->size), "cudaMalloc failed while creating texture"))
   {
     free(texture);
     return nullptr;
@@ -174,40 +181,56 @@ C3D_API bool c3dDeleteTexture(C3DTexture* texture)
   return success;
 }
 
-C3D_API bool c3dReadTexture(C3DTexture* texture, size_t offset, size_t size, void* buffer)
+C3D_API bool c3dReadTexture(C3DTexture* texture, size_t textureOffset, size_t size, C3DStageBuffer* stageBuffer, size_t stageOffset)
 {
-  if (!c3dCheckTextureRange(texture, offset, size, buffer, "texture read range is out of bounds"))
+  if (!c3dCheckTextureRange(texture, textureOffset, size, "texture read range is out of bounds")
+      || !c3dCheckStageRange(stageBuffer, stageOffset, size, "stage buffer write range is out of bounds"))
+  {
     return false;
-  if (size == 0)
-    return true;
+  }
 
-  const char* source = (const char*)(texture->data) + offset;
-  return c3dCheckCUDA(cudaMemcpy(buffer, source, size, cudaMemcpyDeviceToHost), "cudaMemcpy failed while reading texture");
+  if (size == 0)
+  {
+    return true;
+  }
+
+  return c3dCheckCUDA(cudaMemcpy(stageBuffer->data + stageOffset, texture->data + textureOffset, size, cudaMemcpyDeviceToHost), "cudaMemcpy failed while reading texture");
 }
 
-C3D_API bool c3dWriteTexture(C3DTexture* texture, size_t offset, size_t size, void* buffer)
+C3D_API bool c3dWriteTexture(C3DTexture* texture, size_t textureOffset, size_t size, C3DStageBuffer* stageBuffer, size_t stageOffset)
 {
-  if (!c3dCheckTextureRange(texture, offset, size, buffer, "texture write range is out of bounds"))
+  if (!c3dCheckTextureRange(texture, textureOffset, size, "texture write range is out of bounds")
+      || !c3dCheckStageRange(stageBuffer, stageOffset, size, "stage buffer read range is out of bounds"))
+  {
     return false;
+  }
+
   if (size == 0)
+  {
     return true;
-  char* destination = (char*)(texture->data) + offset;
-  return c3dCheckCUDA(cudaMemcpy(destination, buffer, size, cudaMemcpyHostToDevice), "cudaMemcpy failed while writing texture");
+  }
+
+  return c3dCheckCUDA(cudaMemcpy(texture->data + textureOffset, stageBuffer->data + stageOffset, size, cudaMemcpyHostToDevice), "cudaMemcpy failed while writing texture");
 }
 
 C3D_API bool c3dFillTexture(C3DTexture* texture, size_t offset, size_t size, void* texel)
 {
   uint32_t value = 0;
-  size_t texel_offset = 0;
+  size_t texelOffset = 0;
   size_t texelCount = 0;
-  if (!c3dTryGetFillTextureArgs(texture, offset, size, texel, &value, &texel_offset, &texelCount))
+  if (!c3dTryGetFillTextureArgs(texture, offset, size, texel, &value, &texelOffset, &texelCount))
+  {
     return false;
+  }
+
   if (texelCount == 0)
+  {
     return true;
+  }
 
   const int threadsPerBlock = 256;
   const int blockCount = (int)((texelCount + (size_t)threadsPerBlock - 1) / (size_t)threadsPerBlock);
-  uint32_t* destination = (uint32_t*)(texture->data) + texel_offset;
+  uint32_t* destination = (uint32_t*)texture->data + texelOffset;
   c3dFillTextureKernel<<<blockCount, threadsPerBlock>>>(destination, texelCount, value);
   return c3dCheckCUDA(cudaPeekAtLastError(), "texture fill kernel launch failed") && c3dCheckCUDA(cudaDeviceSynchronize(), "texture fill kernel execution failed");
 }
@@ -250,18 +273,24 @@ C3D_API bool c3dResizeTexture(C3DTexture* texture, size_t width, size_t height, 
 
   size_t newSize = 0;
   if (!c3dTryGetTextureSize(&info, &newSize))
+  {
     return false;
+  }
 
   info = c3dNormalizeTextureInfo(info);
 
-  void* newData = nullptr;
-  if (!c3dCheckCUDA(cudaMalloc(&newData, newSize), "cudaMalloc failed while resizing texture"))
+  uint8_t* newData = nullptr;
+  if (!c3dCheckCUDA(cudaMalloc((void**)&newData, newSize), "cudaMalloc failed while resizing texture"))
+  {
     return false;
+  }
 
   size_t copySize = texture->size < newSize ? texture->size : newSize;
   bool success = true;
   if (copySize != 0)
+  {
     success = c3dCheckCUDA(cudaMemcpy(newData, texture->data, copySize, cudaMemcpyDeviceToDevice), "cudaMemcpy failed while resizing texture");
+  }
 
   if (!success)
   {
