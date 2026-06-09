@@ -501,6 +501,14 @@ static __host__ __device__ float c3dEdge(float ax, float ay, float bx, float by,
   return ((px - ax) * (by - ay)) - ((py - ay) * (bx - ax));
 }
 
+static __host__ __device__ void c3dGetViewportTileBounds(C3DViewport viewport, size_t* minTileX, size_t* minTileY, size_t* maxTileX, size_t* maxTileY)
+{
+  *minTileX = viewport.x / (size_t)C3D_TILE_SIZE;
+  *minTileY = viewport.y / (size_t)C3D_TILE_SIZE;
+  *maxTileX = (viewport.x + viewport.width - 1) / (size_t)C3D_TILE_SIZE;
+  *maxTileY = (viewport.y + viewport.height - 1) / (size_t)C3D_TILE_SIZE;
+}
+
 static __device__ void c3dGetTriangleDrawIndices(C3DTopology topology, size_t primitiveIndex, size_t* a, size_t* b, size_t* c)
 {
   if (topology == C3D_TOPOLOGY_QUAD)
@@ -528,55 +536,15 @@ static __device__ void c3dGetTriangleDrawIndices(C3DTopology topology, size_t pr
   *c = base + 2;
 }
 
-static __global__ void c3dClearDepthBufferKernel(uint64_t* depthBuffer, size_t count)
+static __global__ void c3dClearDepthBufferKernel(uint64_t* depthBuffer, size_t width, size_t height)
 {
-  size_t index = ((size_t)blockIdx.x * (size_t)blockDim.x) + (size_t)threadIdx.x;
-  if (index < count)
+  size_t x = ((size_t)blockIdx.x * (size_t)blockDim.x) + (size_t)threadIdx.x;
+  size_t y = ((size_t)blockIdx.y * (size_t)blockDim.y) + (size_t)threadIdx.y;
+  if (x < width && y < height)
   {
+    size_t index = (y * width) + x;
     depthBuffer[index] = ~0ull;
   }
-}
-
-static __global__ void c3dFinalizeTileOffsetsKernel(uint32_t* tileOffsets, const uint32_t* tileCounts, size_t tileCount)
-{
-  if (threadIdx.x == 0 && blockIdx.x == 0)
-  {
-    if (tileCount == 0)
-    {
-      tileOffsets[0] = 0;
-      return;
-    }
-
-    tileOffsets[tileCount] = tileOffsets[tileCount - 1] + tileCounts[tileCount - 1];
-  }
-}
-
-static __global__ void c3dTileScanStepKernel(const uint32_t* input, uint32_t* output, size_t count, size_t stride)
-{
-  size_t index = ((size_t)blockIdx.x * (size_t)blockDim.x) + (size_t)threadIdx.x;
-  if (index >= count)
-  {
-    return;
-  }
-
-  uint32_t value = input[index];
-  if (index >= stride)
-  {
-    value += input[index - stride];
-  }
-
-  output[index] = value;
-}
-
-static __global__ void c3dTileExclusiveShiftKernel(const uint32_t* inclusive, uint32_t* exclusive, size_t count)
-{
-  size_t index = ((size_t)blockIdx.x * (size_t)blockDim.x) + (size_t)threadIdx.x;
-  if (index >= count)
-  {
-    return;
-  }
-
-  exclusive[index] = index == 0 ? 0u : inclusive[index - 1];
 }
 
 static __global__ void c3dSetupLinePrimitivesKernel(C3DLinePrimitive* primitives, C3DTextureInfo targetInfo, C3DViewport viewport, const uint8_t* indexData, C3DIndexSize indexSize, size_t firstIndex, size_t indexBase, const C3DVertex* vertexData, size_t vertexOffset, size_t primitiveCount, uint32_t orderBase)
@@ -639,7 +607,7 @@ static __global__ void c3dSetupTrianglePrimitivesKernel(C3DTrianglePrimitive* pr
   primitives[primitiveIndex] = primitive;
 }
 
-static __global__ void c3dBinLinePrimitivesKernel(const C3DLinePrimitive* primitives, size_t primitiveCount, size_t tilesX, uint32_t* tileCounts)
+static __global__ void c3dBinLinePrimitivesKernel(const C3DLinePrimitive* primitives, size_t primitiveCount, size_t tileBaseX, size_t tileBaseY, size_t tilesX, uint32_t* tileCounts)
 {
   size_t primitiveIndex = ((size_t)blockIdx.x * (size_t)blockDim.x) + (size_t)threadIdx.x;
   if (primitiveIndex >= primitiveCount)
@@ -661,12 +629,12 @@ static __global__ void c3dBinLinePrimitivesKernel(const C3DLinePrimitive* primit
   {
     for (int tileX = minTileX; tileX <= maxTileX; ++tileX)
     {
-      atomicAdd(&tileCounts[(tileY * (int)tilesX) + tileX], 1u);
+      atomicAdd(&tileCounts[((tileY - (int)tileBaseY) * (int)tilesX) + (tileX - (int)tileBaseX)], 1u);
     }
   }
 }
 
-static __global__ void c3dBinTrianglePrimitivesKernel(const C3DTrianglePrimitive* primitives, size_t primitiveCount, size_t tilesX, uint32_t* tileCounts)
+static __global__ void c3dBinTrianglePrimitivesKernel(const C3DTrianglePrimitive* primitives, size_t primitiveCount, size_t tileBaseX, size_t tileBaseY, size_t tilesX, uint32_t* tileCounts)
 {
   size_t primitiveIndex = ((size_t)blockIdx.x * (size_t)blockDim.x) + (size_t)threadIdx.x;
   if (primitiveIndex >= primitiveCount)
@@ -688,12 +656,12 @@ static __global__ void c3dBinTrianglePrimitivesKernel(const C3DTrianglePrimitive
   {
     for (int tileX = minTileX; tileX <= maxTileX; ++tileX)
     {
-      atomicAdd(&tileCounts[(tileY * (int)tilesX) + tileX], 1u);
+      atomicAdd(&tileCounts[((tileY - (int)tileBaseY) * (int)tilesX) + (tileX - (int)tileBaseX)], 1u);
     }
   }
 }
 
-static __global__ void c3dScatterLinePrimitivesKernel(const C3DLinePrimitive* primitives, size_t primitiveCount, size_t tilesX, uint32_t* tileOffsets, uint32_t* tileIndices)
+static __global__ void c3dScatterLinePrimitivesKernel(const C3DLinePrimitive* primitives, size_t primitiveCount, size_t tileBaseX, size_t tileBaseY, size_t tilesX, uint32_t* tileOffsets, uint32_t* tileIndices)
 {
   size_t primitiveIndex = ((size_t)blockIdx.x * (size_t)blockDim.x) + (size_t)threadIdx.x;
   if (primitiveIndex >= primitiveCount)
@@ -715,14 +683,14 @@ static __global__ void c3dScatterLinePrimitivesKernel(const C3DLinePrimitive* pr
   {
     for (int tileX = minTileX; tileX <= maxTileX; ++tileX)
     {
-      uint32_t tileIndex = (uint32_t)((tileY * (int)tilesX) + tileX);
+      uint32_t tileIndex = (uint32_t)(((tileY - (int)tileBaseY) * (int)tilesX) + (tileX - (int)tileBaseX));
       uint32_t offset = atomicAdd(&tileOffsets[tileIndex], 1u);
       tileIndices[offset] = (uint32_t)primitiveIndex;
     }
   }
 }
 
-static __global__ void c3dScatterTrianglePrimitivesKernel(const C3DTrianglePrimitive* primitives, size_t primitiveCount, size_t tilesX, uint32_t* tileOffsets, uint32_t* tileIndices)
+static __global__ void c3dScatterTrianglePrimitivesKernel(const C3DTrianglePrimitive* primitives, size_t primitiveCount, size_t tileBaseX, size_t tileBaseY, size_t tilesX, uint32_t* tileOffsets, uint32_t* tileIndices)
 {
   size_t primitiveIndex = ((size_t)blockIdx.x * (size_t)blockDim.x) + (size_t)threadIdx.x;
   if (primitiveIndex >= primitiveCount)
@@ -744,17 +712,17 @@ static __global__ void c3dScatterTrianglePrimitivesKernel(const C3DTrianglePrimi
   {
     for (int tileX = minTileX; tileX <= maxTileX; ++tileX)
     {
-      uint32_t tileIndex = (uint32_t)((tileY * (int)tilesX) + tileX);
+      uint32_t tileIndex = (uint32_t)(((tileY - (int)tileBaseY) * (int)tilesX) + (tileX - (int)tileBaseX));
       uint32_t offset = atomicAdd(&tileOffsets[tileIndex], 1u);
       tileIndices[offset] = (uint32_t)primitiveIndex;
     }
   }
 }
 
-static __global__ void c3dRasterizeLinesKernel(C3DTextureInfo targetInfo, uint8_t* pixels, uint64_t* depthBuffer, C3DBlendMode blendMode, const C3DTextureView* textureViews, size_t textureCount, const C3DLinePrimitive* primitives, size_t tilesX, const uint32_t* tileOffsets, const uint32_t* tileIndices)
+static __global__ void c3dRasterizeLinesKernel(C3DTextureInfo targetInfo, uint8_t* pixels, uint64_t* depthBuffer, C3DBlendMode blendMode, const C3DTextureView* textureViews, size_t textureCount, const C3DLinePrimitive* primitives, size_t tileBaseX, size_t tileBaseY, size_t tilesX, const uint32_t* tileOffsets, const uint32_t* tileIndices)
 {
-  size_t tileX = (size_t)blockIdx.x;
-  size_t tileY = (size_t)blockIdx.y;
+  size_t tileX = tileBaseX + (size_t)blockIdx.x;
+  size_t tileY = tileBaseY + (size_t)blockIdx.y;
   size_t x = (tileX * (size_t)C3D_TILE_SIZE) + (size_t)threadIdx.x;
   size_t y = (tileY * (size_t)C3D_TILE_SIZE) + (size_t)threadIdx.y;
   if (x >= targetInfo.width || y >= targetInfo.height)
@@ -762,7 +730,7 @@ static __global__ void c3dRasterizeLinesKernel(C3DTextureInfo targetInfo, uint8_
     return;
   }
 
-  size_t tileIndex = (tileY * tilesX) + tileX;
+  size_t tileIndex = (((tileY - tileBaseY) * tilesX) + (tileX - tileBaseX));
   uint32_t start = tileOffsets[tileIndex];
   uint32_t end = tileOffsets[tileIndex + 1];
   bool depthTestEnabled = depthBuffer != nullptr;
@@ -839,10 +807,10 @@ static __global__ void c3dRasterizeLinesKernel(C3DTextureInfo targetInfo, uint8_
   }
 }
 
-static __global__ void c3dRasterizeTrianglesKernel(C3DTextureInfo targetInfo, uint8_t* pixels, uint64_t* depthBuffer, C3DBlendMode blendMode, const C3DTextureView* textureViews, size_t textureCount, const C3DTrianglePrimitive* primitives, size_t tilesX, const uint32_t* tileOffsets, const uint32_t* tileIndices)
+static __global__ void c3dRasterizeTrianglesKernel(C3DTextureInfo targetInfo, uint8_t* pixels, uint64_t* depthBuffer, C3DBlendMode blendMode, const C3DTextureView* textureViews, size_t textureCount, const C3DTrianglePrimitive* primitives, size_t tileBaseX, size_t tileBaseY, size_t tilesX, const uint32_t* tileOffsets, const uint32_t* tileIndices)
 {
-  size_t tileX = (size_t)blockIdx.x;
-  size_t tileY = (size_t)blockIdx.y;
+  size_t tileX = tileBaseX + (size_t)blockIdx.x;
+  size_t tileY = tileBaseY + (size_t)blockIdx.y;
   size_t x = (tileX * (size_t)C3D_TILE_SIZE) + (size_t)threadIdx.x;
   size_t y = (tileY * (size_t)C3D_TILE_SIZE) + (size_t)threadIdx.y;
   if (x >= targetInfo.width || y >= targetInfo.height)
@@ -850,7 +818,7 @@ static __global__ void c3dRasterizeTrianglesKernel(C3DTextureInfo targetInfo, ui
     return;
   }
 
-  size_t tileIndex = (tileY * tilesX) + tileX;
+  size_t tileIndex = (((tileY - tileBaseY) * tilesX) + (tileX - tileBaseX));
   uint32_t start = tileOffsets[tileIndex];
   uint32_t end = tileOffsets[tileIndex + 1];
   bool depthTestEnabled = depthBuffer != nullptr;
@@ -997,11 +965,18 @@ static size_t c3dGetPrimitiveCount(const C3DDrawInfo* drawInfo)
   return 0;
 }
 
-static bool c3dBuildTileBins(C3DCommandBuffer* commandBuffer, C3DTextureInfo targetInfo, size_t primitiveCount, bool triangles, const void* primitives, size_t* tilesXOut, size_t* tilesYOut)
+static bool c3dBuildTileBins(C3DCommandBuffer* commandBuffer, C3DTextureInfo targetInfo, C3DViewport viewport, size_t primitiveCount, bool triangles, const void* primitives, size_t* tileBaseXOut, size_t* tileBaseYOut, size_t* tilesXOut, size_t* tilesYOut)
 {
-  size_t tilesX = (targetInfo.width + (size_t)C3D_TILE_SIZE - 1) / (size_t)C3D_TILE_SIZE;
-  size_t tilesY = (targetInfo.height + (size_t)C3D_TILE_SIZE - 1) / (size_t)C3D_TILE_SIZE;
+  size_t tileBaseX = 0;
+  size_t tileBaseY = 0;
+  size_t tileMaxX = 0;
+  size_t tileMaxY = 0;
+  c3dGetViewportTileBounds(viewport, &tileBaseX, &tileBaseY, &tileMaxX, &tileMaxY);
+  size_t tilesX = (tileMaxX - tileBaseX) + 1;
+  size_t tilesY = (tileMaxY - tileBaseY) + 1;
   size_t tileCount = tilesX * tilesY;
+  *tileBaseXOut = tileBaseX;
+  *tileBaseYOut = tileBaseY;
   *tilesXOut = tilesX;
   *tilesYOut = tilesY;
 
@@ -1020,6 +995,11 @@ static bool c3dBuildTileBins(C3DCommandBuffer* commandBuffer, C3DTextureInfo tar
     return false;
   }
 
+  if (!c3dTryResizeHostBuffer(&commandBuffer->tileOffsetsHost, &commandBuffer->tileOffsetsHostCap, tileCount + 1, "failed to allocate host tile offsets"))
+  {
+    return false;
+  }
+
   if (!c3dCheckCUDA(cudaMemset(commandBuffer->tileCountsDevice, 0, tileCount * sizeof(uint32_t)), "cudaMemset failed while clearing tile counts"))
   {
     return false;
@@ -1029,11 +1009,11 @@ static bool c3dBuildTileBins(C3DCommandBuffer* commandBuffer, C3DTextureInfo tar
   const int binBlocks = (int)((primitiveCount + (size_t)binThreads - 1) / (size_t)binThreads);
   if (triangles)
   {
-    c3dBinTrianglePrimitivesKernel<<<binBlocks, binThreads>>>((const C3DTrianglePrimitive*)primitives, primitiveCount, tilesX, commandBuffer->tileCountsDevice);
+    c3dBinTrianglePrimitivesKernel<<<binBlocks, binThreads>>>((const C3DTrianglePrimitive*)primitives, primitiveCount, tileBaseX, tileBaseY, tilesX, commandBuffer->tileCountsDevice);
   }
   else
   {
-    c3dBinLinePrimitivesKernel<<<binBlocks, binThreads>>>((const C3DLinePrimitive*)primitives, primitiveCount, tilesX, commandBuffer->tileCountsDevice);
+    c3dBinLinePrimitivesKernel<<<binBlocks, binThreads>>>((const C3DLinePrimitive*)primitives, primitiveCount, tileBaseX, tileBaseY, tilesX, commandBuffer->tileCountsDevice);
   }
 
   if (!c3dCheckCUDA(cudaPeekAtLastError(), "tile bin count kernel launch failed"))
@@ -1041,36 +1021,23 @@ static bool c3dBuildTileBins(C3DCommandBuffer* commandBuffer, C3DTextureInfo tar
     return false;
   }
 
-  const int scanThreads = 256;
-  const int scanBlocks = (int)((tileCount + (size_t)scanThreads - 1) / (size_t)scanThreads);
-  uint32_t* scanInput = commandBuffer->tileCountsDevice;
-  uint32_t* scanOutput = commandBuffer->tileOffsetsDevice;
-  for (size_t stride = 1; stride < tileCount; stride *= 2)
-  {
-    c3dTileScanStepKernel<<<scanBlocks, scanThreads>>>(scanInput, scanOutput, tileCount, stride);
-    if (!c3dCheckCUDA(cudaPeekAtLastError(), "tile scan kernel launch failed"))
-    {
-      return false;
-    }
-
-    uint32_t* temp = scanInput;
-    scanInput = scanOutput;
-    scanOutput = temp;
-  }
-
-  c3dTileExclusiveShiftKernel<<<scanBlocks, scanThreads>>>(scanInput, commandBuffer->tileOffsetsDevice, tileCount);
-  if (!c3dCheckCUDA(cudaPeekAtLastError(), "tile exclusive shift kernel launch failed"))
+  if (!c3dCheckCUDA(cudaMemcpy(commandBuffer->tileOffsetsHost, commandBuffer->tileCountsDevice, tileCount * sizeof(uint32_t), cudaMemcpyDeviceToHost), "cudaMemcpy failed while reading tile counts"))
   {
     return false;
   }
 
-  c3dFinalizeTileOffsetsKernel<<<1, 1>>>(commandBuffer->tileOffsetsDevice, commandBuffer->tileCountsDevice, tileCount);
-  if (!c3dCheckCUDA(cudaPeekAtLastError(), "tile offset finalize kernel launch failed"))
+  uint32_t runningCount = 0;
+  for (size_t i = 0; i < tileCount; ++i)
   {
-    return false;
+    uint32_t tileCountValue = commandBuffer->tileOffsetsHost[i];
+    commandBuffer->tileOffsetsHost[i] = runningCount;
+    runningCount += tileCountValue;
   }
 
-  if (!c3dCheckCUDA(cudaMemcpy(commandBuffer->tileCountsHost, commandBuffer->tileOffsetsDevice + tileCount, sizeof(uint32_t), cudaMemcpyDeviceToHost), "cudaMemcpy failed while reading tile index count"))
+  commandBuffer->tileOffsetsHost[tileCount] = runningCount;
+  commandBuffer->tileCountsHost[0] = runningCount;
+
+  if (!c3dCheckCUDA(cudaMemcpy(commandBuffer->tileOffsetsDevice, commandBuffer->tileOffsetsHost, (tileCount + 1) * sizeof(uint32_t), cudaMemcpyHostToDevice), "cudaMemcpy failed while uploading tile offsets"))
   {
     return false;
   }
@@ -1088,11 +1055,11 @@ static bool c3dBuildTileBins(C3DCommandBuffer* commandBuffer, C3DTextureInfo tar
 
   if (triangles)
   {
-    c3dScatterTrianglePrimitivesKernel<<<binBlocks, binThreads>>>((const C3DTrianglePrimitive*)primitives, primitiveCount, tilesX, commandBuffer->tileCountsDevice, commandBuffer->tileIndicesDevice);
+    c3dScatterTrianglePrimitivesKernel<<<binBlocks, binThreads>>>((const C3DTrianglePrimitive*)primitives, primitiveCount, tileBaseX, tileBaseY, tilesX, commandBuffer->tileCountsDevice, commandBuffer->tileIndicesDevice);
   }
   else
   {
-    c3dScatterLinePrimitivesKernel<<<binBlocks, binThreads>>>((const C3DLinePrimitive*)primitives, primitiveCount, tilesX, commandBuffer->tileCountsDevice, commandBuffer->tileIndicesDevice);
+    c3dScatterLinePrimitivesKernel<<<binBlocks, binThreads>>>((const C3DLinePrimitive*)primitives, primitiveCount, tileBaseX, tileBaseY, tilesX, commandBuffer->tileCountsDevice, commandBuffer->tileIndicesDevice);
   }
 
   return c3dCheckCUDA(cudaPeekAtLastError(), "tile scatter kernel launch failed");
@@ -1114,6 +1081,8 @@ static bool c3dExecuteDraw(C3DCommandBuffer* commandBuffer, C3DTexture* target, 
   *primitiveOrderCount = (uint32_t)primitiveCount;
 
   dim3 rasterThreads(C3D_TILE_SIZE, C3D_TILE_SIZE);
+  size_t tileBaseX = 0;
+  size_t tileBaseY = 0;
   size_t tilesX = 0;
   size_t tilesY = 0;
 
@@ -1142,12 +1111,16 @@ static bool c3dExecuteDraw(C3DCommandBuffer* commandBuffer, C3DTexture* target, 
     bool success = c3dCheckCUDA(cudaPeekAtLastError(), "line setup kernel launch failed");
     if (success)
     {
-      success = c3dBuildTileBins(commandBuffer, targetInfo, primitiveCount, false, primitives, &tilesX, &tilesY);
+      success = c3dBuildTileBins(commandBuffer, targetInfo, renderPass->viewport, primitiveCount, false, primitives, &tileBaseX, &tileBaseY, &tilesX, &tilesY);
+    }
+    if (success && commandBuffer->tileCountsHost[0] == 0)
+    {
+      return true;
     }
     if (success)
     {
       dim3 rasterBlocks((unsigned int)tilesX, (unsigned int)tilesY);
-      c3dRasterizeLinesKernel<<<rasterBlocks, rasterThreads>>>(targetInfo, pixels, depthBuffer, renderPass->targetBlend, textureViews, renderPass->textureBindCount, primitives, tilesX, commandBuffer->tileOffsetsDevice, commandBuffer->tileIndicesDevice);
+      c3dRasterizeLinesKernel<<<rasterBlocks, rasterThreads>>>(targetInfo, pixels, depthBuffer, renderPass->targetBlend, textureViews, renderPass->textureBindCount, primitives, tileBaseX, tileBaseY, tilesX, commandBuffer->tileOffsetsDevice, commandBuffer->tileIndicesDevice);
       success = c3dCheckCUDA(cudaPeekAtLastError(), "line raster kernel launch failed");
     }
 
@@ -1183,12 +1156,16 @@ static bool c3dExecuteDraw(C3DCommandBuffer* commandBuffer, C3DTexture* target, 
   bool success = c3dCheckCUDA(cudaPeekAtLastError(), "triangle setup kernel launch failed");
   if (success)
   {
-    success = c3dBuildTileBins(commandBuffer, targetInfo, primitiveCount, true, primitives, &tilesX, &tilesY);
+    success = c3dBuildTileBins(commandBuffer, targetInfo, renderPass->viewport, primitiveCount, true, primitives, &tileBaseX, &tileBaseY, &tilesX, &tilesY);
+  }
+  if (success && commandBuffer->tileCountsHost[0] == 0)
+  {
+    return true;
   }
   if (success)
   {
     dim3 rasterBlocks((unsigned int)tilesX, (unsigned int)tilesY);
-    c3dRasterizeTrianglesKernel<<<rasterBlocks, rasterThreads>>>(targetInfo, pixels, depthBuffer, renderPass->targetBlend, textureViews, renderPass->textureBindCount, primitives, tilesX, commandBuffer->tileOffsetsDevice, commandBuffer->tileIndicesDevice);
+    c3dRasterizeTrianglesKernel<<<rasterBlocks, rasterThreads>>>(targetInfo, pixels, depthBuffer, renderPass->targetBlend, textureViews, renderPass->textureBindCount, primitives, tileBaseX, tileBaseY, tilesX, commandBuffer->tileOffsetsDevice, commandBuffer->tileIndicesDevice);
     success = c3dCheckCUDA(cudaPeekAtLastError(), "triangle raster kernel launch failed");
   }
 
@@ -1216,7 +1193,6 @@ C3D_API bool c3dSubmitCommandBuffer(C3DCommandBuffer* commandBuffer)
   }
 
   C3DTexture* target = commandBuffer->renderPass.target;
-  size_t pixelCount = target->info.width * target->info.height;
   uint64_t* depthBuffer = nullptr;
   C3DTextureView* textureViews = nullptr;
   bool success = true;
@@ -1232,9 +1208,9 @@ C3D_API bool c3dSubmitCommandBuffer(C3DCommandBuffer* commandBuffer)
 
   if (success && depthBuffer)
   {
-    const int clearThreads = 256;
-    const int clearBlocks = (int)((pixelCount + (size_t)clearThreads - 1) / (size_t)clearThreads);
-    c3dClearDepthBufferKernel<<<clearBlocks, clearThreads>>>(depthBuffer, pixelCount);
+    dim3 clearThreads(C3D_TILE_SIZE, C3D_TILE_SIZE);
+    dim3 clearBlocks((unsigned int)((target->info.width + (size_t)clearThreads.x - 1) / (size_t)clearThreads.x), (unsigned int)((target->info.height + (size_t)clearThreads.y - 1) / (size_t)clearThreads.y));
+    c3dClearDepthBufferKernel<<<clearBlocks, clearThreads>>>(depthBuffer, target->info.width, target->info.height);
     success = c3dCheckCUDA(cudaPeekAtLastError(), "depth clear kernel launch failed");
   }
 
