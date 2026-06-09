@@ -2,6 +2,7 @@
 #include <C3D.h>
 #include <math.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <windows.h>
@@ -341,7 +342,7 @@ static HWND openWindow(HINSTANCE instance, int show_command) {
   HWND window = CreateWindowExA(
       0,
       window_class.lpszClassName,
-      "C3D",
+      "C3D Test",
       WS_OVERLAPPEDWINDOW | WS_VISIBLE,
       CW_USEDEFAULT,
       CW_USEDEFAULT,
@@ -413,6 +414,30 @@ static void presentToWindow(HWND window, C3DTexture* texture, const C3DTextureIn
   free(buffer);
 }
 
+static void updateWindowTitle(HWND window, LARGE_INTEGER now, LARGE_INTEGER frequency) {
+  static LARGE_INTEGER last_title_update = {0};
+  static uint32_t frame_count = 0;
+
+  ++frame_count;
+  if (!last_title_update.QuadPart) {
+    last_title_update = now;
+    return;
+  }
+
+  double elapsed_seconds = (double)(now.QuadPart - last_title_update.QuadPart) / (double)frequency.QuadPart;
+  if (elapsed_seconds < 1.0) {
+    return;
+  }
+
+  char title[64];
+  double fps = (double)frame_count / elapsed_seconds;
+  snprintf(title, sizeof(title), "C3D Test - %.1f FPS", fps);
+  SetWindowTextA(window, title);
+
+  frame_count = 0;
+  last_title_update = now;
+}
+
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR command_line, int show_command) {
   (void)previous_instance;
   (void)command_line;
@@ -434,6 +459,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR comman
   backbufferInfo.height = window_height;
   backbufferInfo.format = C3D_TEXTURE_FORMAT_RGBA8;
   C3DTexture* backbuffer = c3dCreateTexture(&backbufferInfo);
+  LARGE_INTEGER performance_frequency;
+  QueryPerformanceFrequency(&performance_frequency);
 
   bool running = true;
   while (running) {
@@ -454,6 +481,10 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR comman
 
     render(backbuffer);
     presentToWindow(window, backbuffer, &backbufferInfo);
+
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    updateWindowTitle(window, now, performance_frequency);
   }
 
   destroyRenderState();

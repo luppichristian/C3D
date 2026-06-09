@@ -2,9 +2,24 @@
 
 #include "c3d_internal.h"
 
+#include <cuda_runtime.h>
+
+#include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+
+static thread_local char g_cuda_error_desc[512];
+
+static bool c3dCheckCUDA(cudaError_t error, const char* desc) {
+  if (error == cudaSuccess) {
+    return true;
+  }
+
+  snprintf(g_cuda_error_desc, sizeof(g_cuda_error_desc), "%s: %s (%d)", desc, cudaGetErrorString(error), (int)error);
+  c3dThrowError(C3D_ERROR_CUDA, g_cuda_error_desc);
+  return false;
+}
 
 static size_t c3dGetIndexStride(C3DIndexSize index_size) {
   switch (index_size) {
@@ -48,27 +63,49 @@ static bool c3dCheckRange(size_t total_size, size_t offset, size_t size, void* b
   return true;
 }
 
-static bool c3dTryResizeHostBuffer(uint8_t** data, size_t old_size, size_t new_size, const char* desc) {
-  uint8_t* new_data = nullptr;
+static bool c3dTryResizeBufferPair(uint8_t** host_data, uint8_t** device_data, size_t old_size, size_t new_size, const char* desc) {
+  uint8_t* new_host_data = nullptr;
+  uint8_t* new_device_data = nullptr;
   if (new_size != 0) {
-    new_data = (uint8_t*)malloc(new_size);
-    if (!new_data) {
+    new_host_data = (uint8_t*)malloc(new_size);
+    if (!new_host_data) {
       c3dThrowError(C3D_ERROR_OUT_OF_MEMORY, desc);
       return false;
     }
 
+    if (!c3dCheckCUDA(cudaMalloc((void**)&new_device_data, new_size), desc)) {
+      free(new_host_data);
+      return false;
+    }
+
     size_t copy_size = old_size < new_size ? old_size : new_size;
-    if (*data && copy_size != 0) {
-      memcpy(new_data, *data, copy_size);
+    if (*host_data && copy_size != 0) {
+      memcpy(new_host_data, *host_data, copy_size);
     }
 
     if (new_size > copy_size) {
-      memset(new_data + copy_size, 0, new_size - copy_size);
+      memset(new_host_data + copy_size, 0, new_size - copy_size);
+    }
+
+    if (!c3dCheckCUDA(cudaMemcpy(new_device_data, new_host_data, new_size, cudaMemcpyHostToDevice), "cudaMemcpy failed while updating buffer device storage")) {
+      free(new_host_data);
+      cudaFree(new_device_data);
+      return false;
     }
   }
 
-  free(*data);
-  *data = new_data;
+  free(*host_data);
+  if (*device_data && !c3dCheckCUDA(cudaFree(*device_data), "cudaFree failed while replacing buffer device storage")) {
+    free(new_host_data);
+    if (new_device_data) {
+      cudaFree(new_device_data);
+    }
+
+    return false;
+  }
+
+  *host_data = new_host_data;
+  *device_data = new_device_data;
   return true;
 }
 
@@ -147,7 +184,7 @@ C3D_API C3DIndexBuffer* c3dCreateIndexBuffer(const C3DIndexBufferInfo* info) {
 
   index_buffer->info = *info;
   index_buffer->size = size;
-  if (!c3dTryResizeHostBuffer(&index_buffer->data, 0, size, "failed to allocate index buffer storage")) {
+  if (!c3dTryResizeBufferPair(&index_buffer->data, &index_buffer->device_data, 0, size, "failed to allocate index buffer storage")) {
     delete index_buffer;
     return nullptr;
   }
@@ -162,6 +199,11 @@ C3D_API bool c3dDeleteIndexBuffer(C3DIndexBuffer* index_buffer) {
   }
 
   free(index_buffer->data);
+  if (index_buffer->device_data && !c3dCheckCUDA(cudaFree(index_buffer->device_data), "cudaFree failed while deleting index buffer")) {
+    delete index_buffer;
+    return false;
+  }
+
   delete index_buffer;
   return true;
 }
@@ -180,7 +222,7 @@ C3D_API bool c3dResizeIndexBuffer(C3DIndexBuffer* index_buffer, size_t index_cap
     return false;
   }
 
-  if (!c3dTryResizeHostBuffer(&index_buffer->data, index_buffer->size, new_size, "failed to resize index buffer storage")) {
+  if (!c3dTryResizeBufferPair(&index_buffer->data, &index_buffer->device_data, index_buffer->size, new_size, "failed to resize index buffer storage")) {
     return false;
   }
 
@@ -218,6 +260,9 @@ C3D_API bool c3dWriteIndexBuffer(C3DIndexBuffer* index_buffer, size_t offset, si
 
   if (size != 0) {
     memcpy(index_buffer->data + offset, buffer, size);
+    if (!c3dCheckCUDA(cudaMemcpy(index_buffer->device_data + offset, buffer, size, cudaMemcpyHostToDevice), "cudaMemcpy failed while writing index buffer")) {
+      return false;
+    }
   }
 
   return true;
@@ -229,7 +274,11 @@ C3D_API bool c3dFillIndexBuffer(C3DIndexBuffer* index_buffer, size_t offset, siz
   }
 
   size_t stride = c3dGetIndexStride(index_buffer->info.indexSize);
-  return c3dFillBytes(index_buffer->data, offset, size, idx, stride, "index buffer fill offset and size must be index-aligned");
+  if (!c3dFillBytes(index_buffer->data, offset, size, idx, stride, "index buffer fill offset and size must be index-aligned")) {
+    return false;
+  }
+
+  return size == 0 || c3dCheckCUDA(cudaMemcpy(index_buffer->device_data + offset, index_buffer->data + offset, size, cudaMemcpyHostToDevice), "cudaMemcpy failed while filling index buffer");
 }
 
 C3D_API bool c3dClearIndexBuffer(C3DIndexBuffer* index_buffer, void* idx) {
@@ -255,7 +304,7 @@ C3D_API C3DVertexBuffer* c3dCreateVertexBuffer(const C3DVertexBufferInfo* info) 
 
   vertex_buffer->info = *info;
   vertex_buffer->size = size;
-  if (!c3dTryResizeHostBuffer(&vertex_buffer->data, 0, size, "failed to allocate vertex buffer storage")) {
+  if (!c3dTryResizeBufferPair(&vertex_buffer->data, &vertex_buffer->device_data, 0, size, "failed to allocate vertex buffer storage")) {
     delete vertex_buffer;
     return nullptr;
   }
@@ -270,6 +319,11 @@ C3D_API bool c3dDeleteVertexBuffer(C3DVertexBuffer* vertex_buffer) {
   }
 
   free(vertex_buffer->data);
+  if (vertex_buffer->device_data && !c3dCheckCUDA(cudaFree(vertex_buffer->device_data), "cudaFree failed while deleting vertex buffer")) {
+    delete vertex_buffer;
+    return false;
+  }
+
   delete vertex_buffer;
   return true;
 }
@@ -288,7 +342,7 @@ C3D_API bool c3dResizeVertexBuffer(C3DVertexBuffer* vertex_buffer, size_t vertex
     return false;
   }
 
-  if (!c3dTryResizeHostBuffer(&vertex_buffer->data, vertex_buffer->size, new_size, "failed to resize vertex buffer storage")) {
+  if (!c3dTryResizeBufferPair(&vertex_buffer->data, &vertex_buffer->device_data, vertex_buffer->size, new_size, "failed to resize vertex buffer storage")) {
     return false;
   }
 
@@ -326,6 +380,9 @@ C3D_API bool c3dWriteVertexBuffer(C3DVertexBuffer* vertex_buffer, size_t offset,
 
   if (size != 0) {
     memcpy(vertex_buffer->data + offset, buffer, size);
+    if (!c3dCheckCUDA(cudaMemcpy(vertex_buffer->device_data + offset, buffer, size, cudaMemcpyHostToDevice), "cudaMemcpy failed while writing vertex buffer")) {
+      return false;
+    }
   }
 
   return true;
@@ -336,7 +393,11 @@ C3D_API bool c3dFillVertexBuffer(C3DVertexBuffer* vertex_buffer, size_t offset, 
     return false;
   }
 
-  return c3dFillBytes(vertex_buffer->data, offset, size, vertex, sizeof(C3DVertex), "vertex buffer fill offset and size must be vertex-aligned");
+  if (!c3dFillBytes(vertex_buffer->data, offset, size, vertex, sizeof(C3DVertex), "vertex buffer fill offset and size must be vertex-aligned")) {
+    return false;
+  }
+
+  return size == 0 || c3dCheckCUDA(cudaMemcpy(vertex_buffer->device_data + offset, vertex_buffer->data + offset, size, cudaMemcpyHostToDevice), "cudaMemcpy failed while filling vertex buffer");
 }
 
 C3D_API bool c3dClearVertexBuffer(C3DVertexBuffer* vertex_buffer, void* vertex) {

@@ -13,12 +13,14 @@ struct C3DTexture {
 struct C3DIndexBuffer {
   C3DIndexBufferInfo info;
   uint8_t* data;
+  uint8_t* device_data;
   size_t size;
 };
 
 struct C3DVertexBuffer {
   C3DVertexBufferInfo info;
   uint8_t* data;
+  uint8_t* device_data;
   size_t size;
 };
 
@@ -33,4 +35,22 @@ struct C3DCommandBuffer {
   C3DRecordedDraw* draws;
   size_t draw_count;
   size_t draw_cap;
+  uint64_t* depth_buffer;
+  size_t depth_cap;
+  void* line_primitives;
+  size_t line_primitive_cap;
+  void* triangle_primitives;
+  size_t triangle_primitive_cap;
+  void* texture_views;
+  size_t texture_view_cap;
+  uint32_t* tile_counts_device;
+  uint32_t* tile_offsets_device;
+  uint32_t* tile_indices_device;
+  uint32_t* tile_counts_host;
+  uint32_t* tile_offsets_host;
+  size_t tile_count_cap;
+  size_t tile_offset_cap;
+  size_t tile_index_cap;
+  size_t tile_counts_host_cap;
+  size_t tile_offsets_host_cap;
 };
