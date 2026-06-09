@@ -19,6 +19,7 @@
 #  define C3D_EXPORT __attribute__((visibility("default")))
 #endif
 
+// Extern C
 #ifdef __cplusplus
 #  define C3D_EXTERN_C extern "C"
 #else
@@ -36,13 +37,17 @@
 // Errors (thread local)
 //
 
-typedef struct {
+#define C3D_ERROR_DESC_CAP 2048
+
+typedef struct
+{
   const char* filename;
   const char* function;
   size_t line;
 } C3DErrorLoc;
 
-typedef enum {
+typedef enum
+{
   C3D_ERROR_NONE = 0,
   C3D_ERROR_INVALID_ARGUMENT,
   C3D_ERROR_UNSUPPORTED_FORMAT,
@@ -50,6 +55,7 @@ typedef enum {
   C3D_ERROR_CUDA,
 } C3DErrorID;
 
+// Make sure to always call c3dThrowError
 C3D_API void _c3dThrowError(C3DErrorID id, const char* desc, C3DErrorLoc loc);
 #ifdef __cplusplus
 #  define c3dThrowError(id, desc) _c3dThrowError(id, desc, C3DErrorLoc {__FILE__, __FUNCTION__, __LINE__})
@@ -57,22 +63,27 @@ C3D_API void _c3dThrowError(C3DErrorID id, const char* desc, C3DErrorLoc loc);
 #  define c3dThrowError(id, desc) _c3dThrowError(id, desc, (C3DErrorLoc) {__FILE__, __FUNCTION__, __LINE__})
 #endif
 
+// Get last thrown error
 C3D_API C3DErrorID c3dGetErrorID(void);
 C3D_API const char* c3dGetErrorDesc(void);
 
+// Error callback management
 typedef void C3DErrorCallback(C3DErrorID id, const char* desc, C3DErrorLoc loc);
 C3D_API void c3dSetErrorCallback(C3DErrorCallback* callback);
+C3D_API C3DErrorCallback* c3dGetErrorCallback(void);
 
 //
 // Textures
 //
 
-typedef enum {
+typedef enum
+{
   C3D_TEXTURE_FORMAT_RGBA8,
   C3D_TEXTURE_FORMAT_BGRA8,
 } C3DTextureFormat;
 
-typedef struct {
+typedef struct
+{
   size_t width;
   size_t height;
   size_t depth;
@@ -94,13 +105,15 @@ C3D_API bool c3dResizeTexture(C3DTexture* texture, size_t width, size_t height, 
 // Index buffer
 //
 
-typedef enum {
+typedef enum
+{
   C3D_INDEX_SIZE_8,
   C3D_INDEX_SIZE_16,
   C3D_INDEX_SIZE_32,
 } C3DIndexSize;
 
-typedef struct {
+typedef struct
+{
   C3DIndexSize indexSize;
   size_t indexCap;
 } C3DIndexBufferInfo;
@@ -120,14 +133,16 @@ C3D_API bool c3dClearIndexBuffer(C3DIndexBuffer* indexBuffer, void* idx);
 // Vertex buffer
 //
 
-typedef struct {
+typedef struct
+{
   float pos[4];
   float col[4];
   float uv[2];
   int texid;
 } C3DVertex;
 
-typedef struct {
+typedef struct
+{
   size_t vertexCap;
 } C3DVertexBufferInfo;
 
@@ -146,31 +161,36 @@ C3D_API bool c3dClearVertexBuffer(C3DVertexBuffer* vertexBuffer, void* idx);
 // Command buffer
 //
 
-typedef enum {
+typedef enum
+{
   C3D_TOPOLOGY_LINE,
   C3D_TOPOLOGY_QUAD,
   C3D_TOPOLOGY_TRIANGLE,
 } C3DTopology;
 
-typedef enum {
+typedef enum
+{
   C3D_SAMPLER_POINT_CLAMP,
   C3D_SAMPLER_POINT_WRAP,
   C3D_SAMPLER_LINEAR_CLAMP,
   C3D_SAMPLER_LINEAR_WRAP,
 } C3DSampler;
 
-typedef enum {
+typedef enum
+{
   C3D_BLEND_MODE_NONE,
   C3D_BLEND_MODE_NORMAL,
   C3D_BLEND_MODE_ADDITIVE,
 } C3DBlendMode;
 
-typedef struct {
+typedef struct
+{
   C3DSampler sampler;
   C3DTexture* texture;
 } C3DTextureBinding;
 
-typedef struct {
+typedef struct
+{
   C3DTopology topology;
   C3DIndexBuffer* indexBuffer;
   size_t indexOffset;
@@ -180,13 +200,12 @@ typedef struct {
   size_t count;
 } C3DDrawInfo;
 
-typedef struct {
+typedef struct
+{
   C3DTexture* target;
   C3DBlendMode targetBlend;
-
   C3DTextureBinding* textureBindings;
   size_t textureBindCount;
-
 } C3DRenderPassInfo;
 
 typedef struct C3DCommandBuffer C3DCommandBuffer;

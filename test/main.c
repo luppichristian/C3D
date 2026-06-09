@@ -2,12 +2,13 @@
 #include <C3D.h>
 #include <math.h>
 #include <stdbool.h>
-#include <stdio.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <windows.h>
 
-typedef struct {
+typedef struct
+{
   bool initialized;
   C3DTexture* texture;
   C3DIndexBuffer* quad_indices;
@@ -20,7 +21,8 @@ typedef struct {
 static RenderState g_render_state = {0};
 static bool g_error_dialog_shown = false;
 
-static void c3dErrorCallback(C3DErrorID id, const char* desc, C3DErrorLoc loc) {
+static void c3dErrorCallback(C3DErrorID id, const char* desc, C3DErrorLoc loc)
+{
   char buffer[1024];
   wsprintfA(
       buffer,
@@ -32,44 +34,53 @@ static void c3dErrorCallback(C3DErrorID id, const char* desc, C3DErrorLoc loc) {
       loc.function ? loc.function : "<unknown>");
   OutputDebugStringA(buffer);
 
-  if (!g_error_dialog_shown) {
+  if (!g_error_dialog_shown)
+  {
     g_error_dialog_shown = true;
     MessageBoxA(NULL, buffer, "C3D Error", MB_OK | MB_ICONERROR);
   }
 }
 
-static void clearFallback(C3DTexture* texture, uint8_t r, uint8_t g, uint8_t b) {
+static void clearFallback(C3DTexture* texture, uint8_t r, uint8_t g, uint8_t b)
+{
   uint8_t clear_color[4] = {r, g, b, 255};
   c3dClearTexture(texture, clear_color);
 }
 
-static void destroyRenderState(void) {
-  if (g_render_state.command_buffer) {
+static void destroyRenderState(void)
+{
+  if (g_render_state.command_buffer)
+  {
     c3dDeleteCommandBuffer(g_render_state.command_buffer);
     g_render_state.command_buffer = NULL;
   }
 
-  if (g_render_state.line_vertices) {
+  if (g_render_state.line_vertices)
+  {
     c3dDeleteVertexBuffer(g_render_state.line_vertices);
     g_render_state.line_vertices = NULL;
   }
 
-  if (g_render_state.line_indices) {
+  if (g_render_state.line_indices)
+  {
     c3dDeleteIndexBuffer(g_render_state.line_indices);
     g_render_state.line_indices = NULL;
   }
 
-  if (g_render_state.quad_vertices) {
+  if (g_render_state.quad_vertices)
+  {
     c3dDeleteVertexBuffer(g_render_state.quad_vertices);
     g_render_state.quad_vertices = NULL;
   }
 
-  if (g_render_state.quad_indices) {
+  if (g_render_state.quad_indices)
+  {
     c3dDeleteIndexBuffer(g_render_state.quad_indices);
     g_render_state.quad_indices = NULL;
   }
 
-  if (g_render_state.texture) {
+  if (g_render_state.texture)
+  {
     c3dDeleteTexture(g_render_state.texture);
     g_render_state.texture = NULL;
   }
@@ -77,20 +88,24 @@ static void destroyRenderState(void) {
   g_render_state.initialized = false;
 }
 
-static bool createCheckerTexture(void) {
+static bool createCheckerTexture(void)
+{
   C3DTextureInfo texture_info = {0};
   texture_info.width = 64;
   texture_info.height = 64;
   texture_info.depth = 1;
   texture_info.format = C3D_TEXTURE_FORMAT_RGBA8;
   g_render_state.texture = c3dCreateTexture(&texture_info);
-  if (!g_render_state.texture) {
+  if (!g_render_state.texture)
+  {
     return false;
   }
 
   uint8_t pixels[64 * 64 * 4];
-  for (size_t y = 0; y < 64; ++y) {
-    for (size_t x = 0; x < 64; ++x) {
+  for (size_t y = 0; y < 64; ++y)
+  {
+    for (size_t x = 0; x < 64; ++x)
+    {
       size_t offset = ((y * 64) + x) * 4;
       bool dark = (((x / 8) + (y / 8)) & 1) != 0;
       pixels[offset + 0] = dark ? 50 : 240;
@@ -103,17 +118,20 @@ static bool createCheckerTexture(void) {
   return c3dWriteTexture(g_render_state.texture, 0, sizeof(pixels), pixels);
 }
 
-static bool createQuadBuffers(void) {
+static bool createQuadBuffers(void)
+{
   static const uint16_t quad_indices[] = {0, 1, 2, 3};
   C3DIndexBufferInfo index_info = {0};
   index_info.indexSize = C3D_INDEX_SIZE_16;
   index_info.indexCap = 4;
   g_render_state.quad_indices = c3dCreateIndexBuffer(&index_info);
-  if (!g_render_state.quad_indices) {
+  if (!g_render_state.quad_indices)
+  {
     return false;
   }
 
-  if (!c3dWriteIndexBuffer(g_render_state.quad_indices, 0, sizeof(quad_indices), (void*)quad_indices)) {
+  if (!c3dWriteIndexBuffer(g_render_state.quad_indices, 0, sizeof(quad_indices), (void*)quad_indices))
+  {
     return false;
   }
 
@@ -123,17 +141,20 @@ static bool createQuadBuffers(void) {
   return g_render_state.quad_vertices != NULL;
 }
 
-static bool createLineBuffers(void) {
+static bool createLineBuffers(void)
+{
   static const uint16_t line_indices[] = {0, 1, 2, 3};
   C3DIndexBufferInfo index_info = {0};
   index_info.indexSize = C3D_INDEX_SIZE_16;
   index_info.indexCap = 4;
   g_render_state.line_indices = c3dCreateIndexBuffer(&index_info);
-  if (!g_render_state.line_indices) {
+  if (!g_render_state.line_indices)
+  {
     return false;
   }
 
-  if (!c3dWriteIndexBuffer(g_render_state.line_indices, 0, sizeof(line_indices), (void*)line_indices)) {
+  if (!c3dWriteIndexBuffer(g_render_state.line_indices, 0, sizeof(line_indices), (void*)line_indices))
+  {
     return false;
   }
 
@@ -143,18 +164,22 @@ static bool createLineBuffers(void) {
   return g_render_state.line_vertices != NULL;
 }
 
-static bool initializeRenderState(void) {
-  if (g_render_state.initialized) {
+static bool initializeRenderState(void)
+{
+  if (g_render_state.initialized)
+  {
     return true;
   }
 
-  if (!createCheckerTexture() || !createQuadBuffers() || !createLineBuffers()) {
+  if (!createCheckerTexture() || !createQuadBuffers() || !createLineBuffers())
+  {
     destroyRenderState();
     return false;
   }
 
   g_render_state.command_buffer = c3dCreateCommandBuffer();
-  if (!g_render_state.command_buffer) {
+  if (!g_render_state.command_buffer)
+  {
     destroyRenderState();
     return false;
   }
@@ -163,10 +188,12 @@ static bool initializeRenderState(void) {
   return true;
 }
 
-static float getSeconds(void) {
+static float getSeconds(void)
+{
   static LARGE_INTEGER frequency = {0};
   LARGE_INTEGER counter;
-  if (frequency.QuadPart == 0) {
+  if (frequency.QuadPart == 0)
+  {
     QueryPerformanceFrequency(&frequency);
   }
 
@@ -174,20 +201,24 @@ static float getSeconds(void) {
   return (float)((double)counter.QuadPart / (double)frequency.QuadPart);
 }
 
-static void render(C3DTexture* texture) {
-  if (!initializeRenderState()) {
+static void render(C3DTexture* texture)
+{
+  if (!initializeRenderState())
+  {
     clearFallback(texture, 255, 0, 255);
     return;
   }
 
   C3DTextureInfo target_info = {0};
-  if (!c3dGetTextureInfo(texture, &target_info)) {
+  if (!c3dGetTextureInfo(texture, &target_info))
+  {
     clearFallback(texture, 255, 0, 255);
     return;
   }
 
   uint8_t clear_color[4] = {18, 22, 30, 255};
-  if (!c3dClearTexture(texture, clear_color)) {
+  if (!c3dClearTexture(texture, clear_color))
+  {
     clearFallback(texture, 255, 0, 255);
     return;
   }
@@ -202,9 +233,9 @@ static void render(C3DTexture* texture) {
   C3DVertex quad_vertices[4] = {0};
   float corners[4][2] = {
       {-scale_x, -scale_y},
-      {scale_x, -scale_y},
-      {scale_x, scale_y},
-      {-scale_x, scale_y},
+      { scale_x, -scale_y},
+      { scale_x,  scale_y},
+      {-scale_x,  scale_y},
   };
   float uvs[4][2] = {
       {0.0f, 1.0f},
@@ -213,13 +244,14 @@ static void render(C3DTexture* texture) {
       {0.0f, 0.0f},
   };
   float colors[4][4] = {
-      {1.0f, 0.45f, 0.35f, 0.90f},
+      { 1.0f, 0.45f, 0.35f, 0.90f},
       {0.25f, 0.95f, 0.55f, 0.90f},
       {0.30f, 0.65f, 1.00f, 0.90f},
       {1.00f, 0.90f, 0.30f, 0.90f},
   };
 
-  for (size_t i = 0; i < 4; ++i) {
+  for (size_t i = 0; i < 4; ++i)
+  {
     float x = corners[i][0];
     float y = corners[i][1];
     quad_vertices[i].pos[0] = (x * c) - (y * s);
@@ -235,7 +267,8 @@ static void render(C3DTexture* texture) {
     quad_vertices[i].texid = 0;
   }
 
-  if (!c3dWriteVertexBuffer(g_render_state.quad_vertices, 0, sizeof(quad_vertices), quad_vertices)) {
+  if (!c3dWriteVertexBuffer(g_render_state.quad_vertices, 0, sizeof(quad_vertices), quad_vertices))
+  {
     clearFallback(texture, 255, 32, 32);
     return;
   }
@@ -250,7 +283,8 @@ static void render(C3DTexture* texture) {
   line_vertices[2].pos[1] = -0.95f;
   line_vertices[3].pos[0] = 0.0f;
   line_vertices[3].pos[1] = 0.95f;
-  for (size_t i = 0; i < 4; ++i) {
+  for (size_t i = 0; i < 4; ++i)
+  {
     line_vertices[i].pos[2] = 0.0f;
     line_vertices[i].pos[3] = 1.0f;
     line_vertices[i].col[0] = 0.15f + (0.85f * pulse);
@@ -262,7 +296,8 @@ static void render(C3DTexture* texture) {
     line_vertices[i].texid = -1;
   }
 
-  if (!c3dWriteVertexBuffer(g_render_state.line_vertices, 0, sizeof(line_vertices), line_vertices)) {
+  if (!c3dWriteVertexBuffer(g_render_state.line_vertices, 0, sizeof(line_vertices), line_vertices))
+  {
     clearFallback(texture, 255, 32, 32);
     return;
   }
@@ -277,7 +312,8 @@ static void render(C3DTexture* texture) {
   render_pass.textureBindings = &binding;
   render_pass.textureBindCount = 1;
 
-  if (!c3dBeginRenderPass(g_render_state.command_buffer, &render_pass)) {
+  if (!c3dBeginRenderPass(g_render_state.command_buffer, &render_pass))
+  {
     clearFallback(texture, 255, 128, 0);
     return;
   }
@@ -291,7 +327,8 @@ static void render(C3DTexture* texture) {
   quad_draw.vertexOffset = 0;
   quad_draw.count = 4;
 
-  if (!c3dDraw(g_render_state.command_buffer, &quad_draw)) {
+  if (!c3dDraw(g_render_state.command_buffer, &quad_draw))
+  {
     c3dCancelCommandBuffer(g_render_state.command_buffer);
     clearFallback(texture, 255, 128, 0);
     return;
@@ -306,21 +343,26 @@ static void render(C3DTexture* texture) {
   line_draw.vertexOffset = 0;
   line_draw.count = 4;
 
-  if (!c3dDraw(g_render_state.command_buffer, &line_draw) || !c3dEndRenderPass(g_render_state.command_buffer)) {
+  if (!c3dDraw(g_render_state.command_buffer, &line_draw) || !c3dEndRenderPass(g_render_state.command_buffer))
+  {
     c3dCancelCommandBuffer(g_render_state.command_buffer);
     clearFallback(texture, 255, 128, 0);
     return;
   }
 
-  if (!c3dSubmitCommandBuffer(g_render_state.command_buffer)) {
+  if (!c3dSubmitCommandBuffer(g_render_state.command_buffer))
+  {
     clearFallback(texture, 255, 255, 0);
   }
 }
 
-static LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
-  switch (message) {
+static LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
+{
+  switch (message)
+  {
     case WM_DESTROY:
-    case WM_CLOSE:   {
+    case WM_CLOSE:
+    {
       PostQuitMessage(0);
       return 0;
     }
@@ -329,13 +371,15 @@ static LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wparam, LPA
   return DefWindowProcA(window, message, wparam, lparam);
 }
 
-static HWND openWindow(HINSTANCE instance, int show_command) {
+static HWND openWindow(HINSTANCE instance, int show_command)
+{
   WNDCLASSA window_class = {0};
   window_class.lpfnWndProc = windowProc;
   window_class.hInstance = instance;
   window_class.lpszClassName = "C3DWindowClass";
   window_class.style = CS_HREDRAW | CS_VREDRAW | CS_OWNDC;
-  if (!RegisterClassA(&window_class)) {
+  if (!RegisterClassA(&window_class))
+  {
     return NULL;
   }
 
@@ -361,10 +405,13 @@ static HWND openWindow(HINSTANCE instance, int show_command) {
   return window;
 }
 
-static bool pollMessages(void) {
+static bool pollMessages(void)
+{
   MSG message;
-  while (PeekMessageA(&message, 0, 0, 0, PM_REMOVE)) {
-    if (message.message == WM_QUIT) {
+  while (PeekMessageA(&message, 0, 0, 0, PM_REMOVE))
+  {
+    if (message.message == WM_QUIT)
+    {
       return false;
     }
 
@@ -375,8 +422,10 @@ static bool pollMessages(void) {
   return true;
 }
 
-static void presentToWindow(HWND window, C3DTexture* texture, const C3DTextureInfo* info) {
-  struct {
+static void presentToWindow(HWND window, C3DTexture* texture, const C3DTextureInfo* info)
+{
+  struct
+  {
     BITMAPINFOHEADER header;
     DWORD masks[4];
   } bitmap_info = {0};
@@ -414,18 +463,21 @@ static void presentToWindow(HWND window, C3DTexture* texture, const C3DTextureIn
   free(buffer);
 }
 
-static void updateWindowTitle(HWND window, LARGE_INTEGER now, LARGE_INTEGER frequency) {
+static void updateWindowTitle(HWND window, LARGE_INTEGER now, LARGE_INTEGER frequency)
+{
   static LARGE_INTEGER last_title_update = {0};
   static uint32_t frame_count = 0;
 
   ++frame_count;
-  if (!last_title_update.QuadPart) {
+  if (!last_title_update.QuadPart)
+  {
     last_title_update = now;
     return;
   }
 
   double elapsed_seconds = (double)(now.QuadPart - last_title_update.QuadPart) / (double)frequency.QuadPart;
-  if (elapsed_seconds < 1.0) {
+  if (elapsed_seconds < 1.0)
+  {
     return;
   }
 
@@ -438,14 +490,16 @@ static void updateWindowTitle(HWND window, LARGE_INTEGER now, LARGE_INTEGER freq
   last_title_update = now;
 }
 
-int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR command_line, int show_command) {
+int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR command_line, int show_command)
+{
   (void)previous_instance;
   (void)command_line;
 
   c3dSetErrorCallback(c3dErrorCallback);
 
   HWND window = openWindow(instance, show_command);
-  if (!window) {
+  if (!window)
+  {
     return 1;
   }
 
@@ -463,8 +517,10 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR comman
   QueryPerformanceFrequency(&performance_frequency);
 
   bool running = true;
-  while (running) {
-    if (!pollMessages()) {
+  while (running)
+  {
+    if (!pollMessages())
+    {
       break;
     }
 
@@ -472,7 +528,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR comman
     GetClientRect(window, &client_rect);
     int window_width = client_rect.right - client_rect.left;
     int window_height = client_rect.bottom - client_rect.top;
-    if ((window_width != backbufferInfo.width) || (window_height != backbufferInfo.height)) {
+    if ((window_width != backbufferInfo.width) || (window_height != backbufferInfo.height))
+    {
       backbufferInfo.width = window_width;
       backbufferInfo.height = window_height;
       c3dDeleteTexture(backbuffer);

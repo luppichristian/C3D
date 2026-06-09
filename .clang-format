@@ -1,7 +1,7 @@
 BasedOnStyle: Chromium
 ColumnLimit: '0'
 UseTab: Never
-BreakBeforeBraces: Attach
+BreakBeforeBraces: Allman
 SortIncludes: Never
 
 # Space and indentation

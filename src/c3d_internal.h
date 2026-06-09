@@ -1,34 +1,38 @@
 #pragma once
 
 #include <C3D.h>
-
 #include <stdint.h>
 
-struct C3DTexture {
+struct C3DTexture
+{
   C3DTextureInfo info;
   void* data;
   size_t size;
 };
 
-struct C3DIndexBuffer {
+struct C3DIndexBuffer
+{
   C3DIndexBufferInfo info;
   uint8_t* data;
   uint8_t* device_data;
   size_t size;
 };
 
-struct C3DVertexBuffer {
+struct C3DVertexBuffer
+{
   C3DVertexBufferInfo info;
   uint8_t* data;
   uint8_t* device_data;
   size_t size;
 };
 
-struct C3DRecordedDraw {
+struct C3DRecordedDraw
+{
   C3DDrawInfo info;
 };
 
-struct C3DCommandBuffer {
+struct C3DCommandBuffer
+{
   bool in_render_pass;
   bool has_render_pass;
   C3DRenderPassInfo render_pass;
@@ -54,3 +58,13 @@ struct C3DCommandBuffer {
   size_t tile_counts_host_cap;
   size_t tile_offsets_host_cap;
 };
+
+static bool c3dCheckCUDA(cudaError_t error, const char* desc)
+{
+  if (error == cudaSuccess)
+    return true;
+  char buffer[C3D_ERROR_DESC_CAP];
+  snprintf(buffer, sizeof(buffer), "%s: %s (%d)", desc, cudaGetErrorString(error), (int)error);
+  c3dThrowError(C3D_ERROR_CUDA, buffer);
+  return false;
+}

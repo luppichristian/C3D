@@ -4,6 +4,8 @@ id(c3d)
 name("C3D")
 ver(0.1.0)
 
+configs(debug release)
+
 targets(
   dyn_lib(
     id(c3d_lib)

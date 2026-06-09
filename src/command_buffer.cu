@@ -1,16 +1,14 @@
 #include <C3D.h>
-
-#include "c3d_internal.h"
-
 #include <cuda_runtime.h>
-
 #include <math.h>
-#include <stdio.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "c3d_internal.h"
 
-struct C3DTextureView {
+struct C3DTextureView
+{
   const uint8_t* pixels;
   size_t width;
   size_t height;
@@ -18,14 +16,16 @@ struct C3DTextureView {
   C3DSampler sampler;
 };
 
-struct C3DPixel {
+struct C3DPixel
+{
   float r;
   float g;
   float b;
   float a;
 };
 
-struct C3DVertexSample {
+struct C3DVertexSample
+{
   float x;
   float y;
   float z;
@@ -39,7 +39,8 @@ struct C3DVertexSample {
   int texid;
 };
 
-struct C3DLinePrimitive {
+struct C3DLinePrimitive
+{
   C3DVertexSample a;
   C3DVertexSample b;
   int min_x;
@@ -50,7 +51,8 @@ struct C3DLinePrimitive {
   int valid;
 };
 
-struct C3DTrianglePrimitive {
+struct C3DTrianglePrimitive
+{
   C3DVertexSample a;
   C3DVertexSample b;
   C3DVertexSample c;
@@ -65,34 +67,27 @@ struct C3DTrianglePrimitive {
 
 static const int C3D_TILE_SIZE = 16;
 
-static thread_local char g_cuda_error_desc[512];
-
-static bool c3dCheckCUDA(cudaError_t error, const char* desc) {
-  if (error == cudaSuccess) {
+static bool c3dTryResizeDeviceBuffer(void** buffer, size_t* cap, size_t required_bytes, const char* desc)
+{
+  if (*cap >= required_bytes)
+  {
     return true;
   }
 
-  snprintf(g_cuda_error_desc, sizeof(g_cuda_error_desc), "%s: %s (%d)", desc, cudaGetErrorString(error), (int)error);
-  c3dThrowError(C3D_ERROR_CUDA, g_cuda_error_desc);
-  return false;
-}
-
-static bool c3dTryResizeDeviceBuffer(void** buffer, size_t* cap, size_t required_bytes, const char* desc) {
-  if (*cap >= required_bytes) {
-    return true;
-  }
-
-  if (*buffer && !c3dCheckCUDA(cudaFree(*buffer), "cudaFree failed while replacing command buffer scratch storage")) {
+  if (*buffer && !c3dCheckCUDA(cudaFree(*buffer), "cudaFree failed while replacing command buffer scratch storage"))
+  {
     return false;
   }
 
   *buffer = nullptr;
   *cap = 0;
-  if (required_bytes == 0) {
+  if (required_bytes == 0)
+  {
     return true;
   }
 
-  if (!c3dCheckCUDA(cudaMalloc(buffer, required_bytes), desc)) {
+  if (!c3dCheckCUDA(cudaMalloc(buffer, required_bytes), desc))
+  {
     return false;
   }
 
@@ -100,13 +95,16 @@ static bool c3dTryResizeDeviceBuffer(void** buffer, size_t* cap, size_t required
   return true;
 }
 
-static bool c3dTryResizeHostBuffer(uint32_t** buffer, size_t* cap, size_t count, const char* desc) {
-  if (*cap >= count) {
+static bool c3dTryResizeHostBuffer(uint32_t** buffer, size_t* cap, size_t count, const char* desc)
+{
+  if (*cap >= count)
+  {
     return true;
   }
 
   uint32_t* new_buffer = (uint32_t*)realloc(*buffer, count * sizeof(uint32_t));
-  if (!new_buffer) {
+  if (!new_buffer)
+  {
     c3dThrowError(C3D_ERROR_OUT_OF_MEMORY, desc);
     return false;
   }
@@ -116,8 +114,10 @@ static bool c3dTryResizeHostBuffer(uint32_t** buffer, size_t* cap, size_t count,
   return true;
 }
 
-static __host__ __device__ size_t c3dGetTextureTexelSize(C3DTextureFormat format) {
-  switch (format) {
+static __host__ __device__ size_t c3dGetTextureTexelSize(C3DTextureFormat format)
+{
+  switch (format)
+  {
     case C3D_TEXTURE_FORMAT_RGBA8:
     case C3D_TEXTURE_FORMAT_BGRA8:
       return 4;
@@ -126,8 +126,10 @@ static __host__ __device__ size_t c3dGetTextureTexelSize(C3DTextureFormat format
   return 0;
 }
 
-static __host__ __device__ size_t c3dGetIndexStride(C3DIndexSize index_size) {
-  switch (index_size) {
+static __host__ __device__ size_t c3dGetIndexStride(C3DIndexSize index_size)
+{
+  switch (index_size)
+  {
     case C3D_INDEX_SIZE_8:
       return 1;
     case C3D_INDEX_SIZE_16:
@@ -139,43 +141,53 @@ static __host__ __device__ size_t c3dGetIndexStride(C3DIndexSize index_size) {
   return 0;
 }
 
-static __host__ __device__ float c3dClamp01(float value) {
-  if (value < 0.0f) {
+static __host__ __device__ float c3dClamp01(float value)
+{
+  if (value < 0.0f)
+  {
     return 0.0f;
   }
 
-  if (value > 1.0f) {
+  if (value > 1.0f)
+  {
     return 1.0f;
   }
 
   return value;
 }
 
-static __host__ __device__ float c3dClampf(float value, float min_value, float max_value) {
-  if (value < min_value) {
+static __host__ __device__ float c3dClampf(float value, float min_value, float max_value)
+{
+  if (value < min_value)
+  {
     return min_value;
   }
 
-  if (value > max_value) {
+  if (value > max_value)
+  {
     return max_value;
   }
 
   return value;
 }
 
-static __host__ __device__ uint8_t c3dFloatToByte(float value) {
+static __host__ __device__ uint8_t c3dFloatToByte(float value)
+{
   float scaled = c3dClamp01(value) * 255.0f;
   return (uint8_t)(scaled + 0.5f);
 }
 
-static __host__ __device__ uint64_t c3dEncodeDepthOrder(float depth, uint32_t order) {
+static __host__ __device__ uint64_t c3dEncodeDepthOrder(float depth, uint32_t order)
+{
   uint32_t depth_bits = (uint32_t)(c3dClamp01(depth) * 4294967295.0f + 0.5f);
   return ((uint64_t)depth_bits << 32) | (uint64_t)order;
 }
 
-static __host__ __device__ C3DPixel c3dUnpackPixel(const uint8_t* texel, C3DTextureFormat format) {
+static __host__ __device__ C3DPixel c3dUnpackPixel(const uint8_t* texel, C3DTextureFormat format)
+{
   C3DPixel pixel = {0};
-  switch (format) {
+  switch (format)
+  {
     case C3D_TEXTURE_FORMAT_RGBA8:
       pixel.r = texel[0] / 255.0f;
       pixel.g = texel[1] / 255.0f;
@@ -193,13 +205,15 @@ static __host__ __device__ C3DPixel c3dUnpackPixel(const uint8_t* texel, C3DText
   return pixel;
 }
 
-static __host__ __device__ void c3dPackPixel(uint8_t* texel, C3DTextureFormat format, C3DPixel pixel) {
+static __host__ __device__ void c3dPackPixel(uint8_t* texel, C3DTextureFormat format, C3DPixel pixel)
+{
   uint8_t r = c3dFloatToByte(pixel.r);
   uint8_t g = c3dFloatToByte(pixel.g);
   uint8_t b = c3dFloatToByte(pixel.b);
   uint8_t a = c3dFloatToByte(pixel.a);
 
-  switch (format) {
+  switch (format)
+  {
     case C3D_TEXTURE_FORMAT_RGBA8:
       texel[0] = r;
       texel[1] = g;
@@ -215,7 +229,8 @@ static __host__ __device__ void c3dPackPixel(uint8_t* texel, C3DTextureFormat fo
   }
 }
 
-static __host__ __device__ C3DPixel c3dMulPixel(C3DPixel a, C3DPixel b) {
+static __host__ __device__ C3DPixel c3dMulPixel(C3DPixel a, C3DPixel b)
+{
   C3DPixel pixel = {0};
   pixel.r = a.r * b.r;
   pixel.g = a.g * b.g;
@@ -224,11 +239,14 @@ static __host__ __device__ C3DPixel c3dMulPixel(C3DPixel a, C3DPixel b) {
   return pixel;
 }
 
-static __host__ __device__ C3DPixel c3dBlendPixel(C3DPixel source, C3DPixel destination, C3DBlendMode blend_mode) {
-  switch (blend_mode) {
+static __host__ __device__ C3DPixel c3dBlendPixel(C3DPixel source, C3DPixel destination, C3DBlendMode blend_mode)
+{
+  switch (blend_mode)
+  {
     case C3D_BLEND_MODE_NONE:
       return source;
-    case C3D_BLEND_MODE_NORMAL: {
+    case C3D_BLEND_MODE_NORMAL:
+    {
       C3DPixel pixel = {0};
       float inv_alpha = 1.0f - source.a;
       pixel.r = source.r + (destination.r * inv_alpha);
@@ -237,7 +255,8 @@ static __host__ __device__ C3DPixel c3dBlendPixel(C3DPixel source, C3DPixel dest
       pixel.a = source.a + (destination.a * inv_alpha);
       return pixel;
     }
-    case C3D_BLEND_MODE_ADDITIVE: {
+    case C3D_BLEND_MODE_ADDITIVE:
+    {
       C3DPixel pixel = {0};
       pixel.r = c3dClamp01(destination.r + (source.r * source.a));
       pixel.g = c3dClamp01(destination.g + (source.g * source.a));
@@ -250,34 +269,42 @@ static __host__ __device__ C3DPixel c3dBlendPixel(C3DPixel source, C3DPixel dest
   return source;
 }
 
-static __device__ uint8_t* c3dGetTargetTexel(C3DTextureInfo target_info, uint8_t* pixels, size_t x, size_t y) {
+static __device__ uint8_t* c3dGetTargetTexel(C3DTextureInfo target_info, uint8_t* pixels, size_t x, size_t y)
+{
   size_t texel_size = c3dGetTextureTexelSize(target_info.format);
   return pixels + (((y * target_info.width) + x) * texel_size);
 }
 
-static __host__ __device__ float c3dWrapCoord(float value) {
+static __host__ __device__ float c3dWrapCoord(float value)
+{
   float wrapped = value - floorf(value);
-  if (wrapped < 0.0f) {
+  if (wrapped < 0.0f)
+  {
     wrapped += 1.0f;
   }
 
   return wrapped;
 }
 
-static __host__ __device__ float c3dClampCoord(float value) {
-  if (value < 0.0f) {
+static __host__ __device__ float c3dClampCoord(float value)
+{
+  if (value < 0.0f)
+  {
     return 0.0f;
   }
 
-  if (value > 1.0f) {
+  if (value > 1.0f)
+  {
     return 1.0f;
   }
 
   return value;
 }
 
-static __host__ __device__ float c3dApplySamplerAddress(float value, C3DSampler sampler) {
-  switch (sampler) {
+static __host__ __device__ float c3dApplySamplerAddress(float value, C3DSampler sampler)
+{
+  switch (sampler)
+  {
     case C3D_SAMPLER_POINT_WRAP:
     case C3D_SAMPLER_LINEAR_WRAP:
       return c3dWrapCoord(value);
@@ -289,12 +316,15 @@ static __host__ __device__ float c3dApplySamplerAddress(float value, C3DSampler 
   return value;
 }
 
-static __host__ __device__ size_t c3dRoundToIndex(float value, size_t limit) {
-  if (limit == 0) {
+static __host__ __device__ size_t c3dRoundToIndex(float value, size_t limit)
+{
+  if (limit == 0)
+  {
     return 0;
   }
 
-  if (value <= 0.0f) {
+  if (value <= 0.0f)
+  {
     return 0;
   }
 
@@ -303,7 +333,8 @@ static __host__ __device__ size_t c3dRoundToIndex(float value, size_t limit) {
   return index > max_index ? max_index : index;
 }
 
-static __device__ C3DPixel c3dSampleTextureNearest(const C3DTextureView* texture, float u, float v) {
+static __device__ C3DPixel c3dSampleTextureNearest(const C3DTextureView* texture, float u, float v)
+{
   float sample_u = c3dApplySamplerAddress(u, texture->sampler);
   float sample_v = c3dApplySamplerAddress(v, texture->sampler);
   float x = sample_u * (float)(texture->width - 1);
@@ -314,7 +345,8 @@ static __device__ C3DPixel c3dSampleTextureNearest(const C3DTextureView* texture
   return c3dUnpackPixel(texel, texture->format);
 }
 
-static __host__ __device__ C3DPixel c3dLerpPixel(C3DPixel a, C3DPixel b, float t) {
+static __host__ __device__ C3DPixel c3dLerpPixel(C3DPixel a, C3DPixel b, float t)
+{
   C3DPixel pixel = {0};
   pixel.r = a.r + ((b.r - a.r) * t);
   pixel.g = a.g + ((b.g - a.g) * t);
@@ -323,7 +355,8 @@ static __host__ __device__ C3DPixel c3dLerpPixel(C3DPixel a, C3DPixel b, float t
   return pixel;
 }
 
-static __device__ C3DPixel c3dSampleTextureLinear(const C3DTextureView* texture, float u, float v) {
+static __device__ C3DPixel c3dSampleTextureLinear(const C3DTextureView* texture, float u, float v)
+{
   float sample_u = c3dApplySamplerAddress(u, texture->sampler);
   float sample_v = c3dApplySamplerAddress(v, texture->sampler);
   float x = sample_u * (float)(texture->width - 1);
@@ -347,14 +380,17 @@ static __device__ C3DPixel c3dSampleTextureLinear(const C3DTextureView* texture,
   return c3dLerpPixel(top, bottom, ty);
 }
 
-static __device__ C3DPixel c3dSampleBoundTexture(const C3DTextureView* texture_views, size_t texture_count, int texid, float u, float v) {
-  if (texid < 0 || (size_t)texid >= texture_count) {
+static __device__ C3DPixel c3dSampleBoundTexture(const C3DTextureView* texture_views, size_t texture_count, int texid, float u, float v)
+{
+  if (texid < 0 || (size_t)texid >= texture_count)
+  {
     C3DPixel white = {1.0f, 1.0f, 1.0f, 1.0f};
     return white;
   }
 
   const C3DTextureView* texture = &texture_views[texid];
-  switch (texture->sampler) {
+  switch (texture->sampler)
+  {
     case C3D_SAMPLER_POINT_CLAMP:
     case C3D_SAMPLER_POINT_WRAP:
       return c3dSampleTextureNearest(texture, u, v);
@@ -367,9 +403,11 @@ static __device__ C3DPixel c3dSampleBoundTexture(const C3DTextureView* texture_v
   return white;
 }
 
-static __host__ __device__ size_t c3dReadIndexValueRaw(const uint8_t* index_data, C3DIndexSize index_size, size_t index) {
+static __host__ __device__ size_t c3dReadIndexValueRaw(const uint8_t* index_data, C3DIndexSize index_size, size_t index)
+{
   const uint8_t* ptr = index_data + (index * c3dGetIndexStride(index_size));
-  switch (index_size) {
+  switch (index_size)
+  {
     case C3D_INDEX_SIZE_8:
       return (size_t)(*(const uint8_t*)ptr);
     case C3D_INDEX_SIZE_16:
@@ -381,21 +419,25 @@ static __host__ __device__ size_t c3dReadIndexValueRaw(const uint8_t* index_data
   return 0;
 }
 
-static bool c3dValidateDrawRanges(const C3DDrawInfo* draw_info) {
+static bool c3dValidateDrawRanges(const C3DDrawInfo* draw_info)
+{
   size_t index_stride = c3dGetIndexStride(draw_info->indexBuffer->info.indexSize);
   size_t index_start = draw_info->indexOffset;
   size_t index_bytes = draw_info->count * index_stride;
-  if (index_start > draw_info->indexBuffer->size || index_bytes > draw_info->indexBuffer->size - index_start) {
+  if (index_start > draw_info->indexBuffer->size || index_bytes > draw_info->indexBuffer->size - index_start)
+  {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "draw index range is out of bounds");
     return false;
   }
 
   size_t first_index = draw_info->indexOffset / index_stride;
   size_t vertex_limit = draw_info->vertexBuffer->info.vertexCap;
-  for (size_t i = 0; i < draw_info->count; ++i) {
+  for (size_t i = 0; i < draw_info->count; ++i)
+  {
     size_t index = c3dReadIndexValueRaw(draw_info->indexBuffer->data, draw_info->indexBuffer->info.indexSize, first_index + i);
     size_t vertex_index = draw_info->vertexOffset + draw_info->indexBase + index;
-    if (vertex_index >= vertex_limit) {
+    if (vertex_index >= vertex_limit)
+    {
       c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "draw vertex range is out of bounds");
       return false;
     }
@@ -411,7 +453,8 @@ static __device__ C3DVertexSample c3dLoadVertexRaw(
     size_t draw_index,
     size_t index_base,
     const C3DVertex* vertex_data,
-    size_t vertex_offset) {
+    size_t vertex_offset)
+{
   size_t index = c3dReadIndexValueRaw(index_data, index_size, first_index + draw_index);
   const C3DVertex* vertex = vertex_data + vertex_offset + index_base + index;
 
@@ -430,12 +473,14 @@ static __device__ C3DVertexSample c3dLoadVertexRaw(
   return sample;
 }
 
-static __host__ __device__ float c3dSampleDepth(const C3DVertexSample* vertex) {
+static __host__ __device__ float c3dSampleDepth(const C3DVertexSample* vertex)
+{
   float inv_w = vertex->w != 0.0f ? (1.0f / vertex->w) : 1.0f;
   return c3dClamp01((vertex->z * inv_w * 0.5f) + 0.5f);
 }
 
-static __host__ __device__ void c3dNdcToScreen(C3DTextureInfo target_info, C3DVertexSample* vertex) {
+static __host__ __device__ void c3dNdcToScreen(C3DTextureInfo target_info, C3DVertexSample* vertex)
+{
   float inv_w = vertex->w != 0.0f ? (1.0f / vertex->w) : 1.0f;
   float x = vertex->x * inv_w;
   float y = vertex->y * inv_w;
@@ -443,20 +488,23 @@ static __host__ __device__ void c3dNdcToScreen(C3DTextureInfo target_info, C3DVe
   vertex->y = (1.0f - ((y * 0.5f) + 0.5f)) * (float)(target_info.height - 1);
 }
 
-static __device__ void c3dWritePixel(C3DTextureInfo target_info, uint8_t* pixels, size_t x, size_t y, C3DPixel color, C3DBlendMode blend_mode) {
+static __device__ void c3dWritePixel(C3DTextureInfo target_info, uint8_t* pixels, size_t x, size_t y, C3DPixel color, C3DBlendMode blend_mode)
+{
   uint8_t* texel = c3dGetTargetTexel(target_info, pixels, x, y);
   C3DPixel destination = c3dUnpackPixel(texel, target_info.format);
   C3DPixel blended = c3dBlendPixel(color, destination, blend_mode);
   c3dPackPixel(texel, target_info.format, blended);
 }
 
-static __device__ void c3dShadePixel(C3DTextureInfo target_info, uint8_t* pixels, C3DBlendMode blend_mode, const C3DTextureView* texture_views, size_t texture_count, size_t x, size_t y, const C3DVertexSample* sample) {
+static __device__ void c3dShadePixel(C3DTextureInfo target_info, uint8_t* pixels, C3DBlendMode blend_mode, const C3DTextureView* texture_views, size_t texture_count, size_t x, size_t y, const C3DVertexSample* sample)
+{
   C3DPixel vertex_color = {sample->r, sample->g, sample->b, sample->a};
   C3DPixel texture_color = c3dSampleBoundTexture(texture_views, texture_count, sample->texid, sample->u, sample->v);
   c3dWritePixel(target_info, pixels, x, y, c3dMulPixel(vertex_color, texture_color), blend_mode);
 }
 
-static __host__ __device__ C3DVertexSample c3dLerpVertex(const C3DVertexSample* a, const C3DVertexSample* b, float t) {
+static __host__ __device__ C3DVertexSample c3dLerpVertex(const C3DVertexSample* a, const C3DVertexSample* b, float t)
+{
   C3DVertexSample sample = {0};
   sample.x = a->x + ((b->x - a->x) * t);
   sample.y = a->y + ((b->y - a->y) * t);
@@ -472,19 +520,25 @@ static __host__ __device__ C3DVertexSample c3dLerpVertex(const C3DVertexSample* 
   return sample;
 }
 
-static __host__ __device__ float c3dEdge(float ax, float ay, float bx, float by, float px, float py) {
+static __host__ __device__ float c3dEdge(float ax, float ay, float bx, float by, float px, float py)
+{
   return ((px - ax) * (by - ay)) - ((py - ay) * (bx - ax));
 }
 
-static __device__ void c3dGetTriangleDrawIndices(C3DTopology topology, size_t primitive_index, size_t* a, size_t* b, size_t* c) {
-  if (topology == C3D_TOPOLOGY_QUAD) {
+static __device__ void c3dGetTriangleDrawIndices(C3DTopology topology, size_t primitive_index, size_t* a, size_t* b, size_t* c)
+{
+  if (topology == C3D_TOPOLOGY_QUAD)
+  {
     size_t quad = primitive_index / 2;
     size_t base = quad * 4;
-    if ((primitive_index & 1) == 0) {
+    if ((primitive_index & 1) == 0)
+    {
       *a = base + 0;
       *b = base + 1;
       *c = base + 2;
-    } else {
+    }
+    else
+    {
       *a = base + 0;
       *b = base + 2;
       *c = base + 3;
@@ -498,16 +552,21 @@ static __device__ void c3dGetTriangleDrawIndices(C3DTopology topology, size_t pr
   *c = base + 2;
 }
 
-static __global__ void c3dClearDepthBufferKernel(uint64_t* depth_buffer, size_t count) {
+static __global__ void c3dClearDepthBufferKernel(uint64_t* depth_buffer, size_t count)
+{
   size_t index = ((size_t)blockIdx.x * (size_t)blockDim.x) + (size_t)threadIdx.x;
-  if (index < count) {
+  if (index < count)
+  {
     depth_buffer[index] = ~0ull;
   }
 }
 
-static __global__ void c3dFinalizeTileOffsetsKernel(uint32_t* tile_offsets, const uint32_t* tile_counts, size_t tile_count) {
-  if (threadIdx.x == 0 && blockIdx.x == 0) {
-    if (tile_count == 0) {
+static __global__ void c3dFinalizeTileOffsetsKernel(uint32_t* tile_offsets, const uint32_t* tile_counts, size_t tile_count)
+{
+  if (threadIdx.x == 0 && blockIdx.x == 0)
+  {
+    if (tile_count == 0)
+    {
       tile_offsets[0] = 0;
       return;
     }
@@ -516,23 +575,28 @@ static __global__ void c3dFinalizeTileOffsetsKernel(uint32_t* tile_offsets, cons
   }
 }
 
-static __global__ void c3dTileScanStepKernel(const uint32_t* input, uint32_t* output, size_t count, size_t stride) {
+static __global__ void c3dTileScanStepKernel(const uint32_t* input, uint32_t* output, size_t count, size_t stride)
+{
   size_t index = ((size_t)blockIdx.x * (size_t)blockDim.x) + (size_t)threadIdx.x;
-  if (index >= count) {
+  if (index >= count)
+  {
     return;
   }
 
   uint32_t value = input[index];
-  if (index >= stride) {
+  if (index >= stride)
+  {
     value += input[index - stride];
   }
 
   output[index] = value;
 }
 
-static __global__ void c3dTileExclusiveShiftKernel(const uint32_t* inclusive, uint32_t* exclusive, size_t count) {
+static __global__ void c3dTileExclusiveShiftKernel(const uint32_t* inclusive, uint32_t* exclusive, size_t count)
+{
   size_t index = ((size_t)blockIdx.x * (size_t)blockDim.x) + (size_t)threadIdx.x;
-  if (index >= count) {
+  if (index >= count)
+  {
     return;
   }
 
@@ -549,9 +613,11 @@ static __global__ void c3dSetupLinePrimitivesKernel(
     const C3DVertex* vertex_data,
     size_t vertex_offset,
     size_t primitive_count,
-    uint32_t order_base) {
+    uint32_t order_base)
+{
   size_t primitive_index = ((size_t)blockIdx.x * (size_t)blockDim.x) + (size_t)threadIdx.x;
-  if (primitive_index >= primitive_count) {
+  if (primitive_index >= primitive_count)
+  {
     return;
   }
 
@@ -584,9 +650,11 @@ static __global__ void c3dSetupTrianglePrimitivesKernel(
     const C3DVertex* vertex_data,
     size_t vertex_offset,
     size_t primitive_count,
-    uint32_t order_base) {
+    uint32_t order_base)
+{
   size_t primitive_index = ((size_t)blockIdx.x * (size_t)blockDim.x) + (size_t)threadIdx.x;
-  if (primitive_index >= primitive_count) {
+  if (primitive_index >= primitive_count)
+  {
     return;
   }
 
@@ -620,14 +688,17 @@ static __global__ void c3dBinLinePrimitivesKernel(
     const C3DLinePrimitive* primitives,
     size_t primitive_count,
     size_t tiles_x,
-    uint32_t* tile_counts) {
+    uint32_t* tile_counts)
+{
   size_t primitive_index = ((size_t)blockIdx.x * (size_t)blockDim.x) + (size_t)threadIdx.x;
-  if (primitive_index >= primitive_count) {
+  if (primitive_index >= primitive_count)
+  {
     return;
   }
 
   const C3DLinePrimitive* primitive = &primitives[primitive_index];
-  if (!primitive->valid) {
+  if (!primitive->valid)
+  {
     return;
   }
 
@@ -635,8 +706,10 @@ static __global__ void c3dBinLinePrimitivesKernel(
   int min_tile_y = primitive->min_y / C3D_TILE_SIZE;
   int max_tile_x = primitive->max_x / C3D_TILE_SIZE;
   int max_tile_y = primitive->max_y / C3D_TILE_SIZE;
-  for (int tile_y = min_tile_y; tile_y <= max_tile_y; ++tile_y) {
-    for (int tile_x = min_tile_x; tile_x <= max_tile_x; ++tile_x) {
+  for (int tile_y = min_tile_y; tile_y <= max_tile_y; ++tile_y)
+  {
+    for (int tile_x = min_tile_x; tile_x <= max_tile_x; ++tile_x)
+    {
       atomicAdd(&tile_counts[(tile_y * (int)tiles_x) + tile_x], 1u);
     }
   }
@@ -646,14 +719,17 @@ static __global__ void c3dBinTrianglePrimitivesKernel(
     const C3DTrianglePrimitive* primitives,
     size_t primitive_count,
     size_t tiles_x,
-    uint32_t* tile_counts) {
+    uint32_t* tile_counts)
+{
   size_t primitive_index = ((size_t)blockIdx.x * (size_t)blockDim.x) + (size_t)threadIdx.x;
-  if (primitive_index >= primitive_count) {
+  if (primitive_index >= primitive_count)
+  {
     return;
   }
 
   const C3DTrianglePrimitive* primitive = &primitives[primitive_index];
-  if (!primitive->valid) {
+  if (!primitive->valid)
+  {
     return;
   }
 
@@ -661,8 +737,10 @@ static __global__ void c3dBinTrianglePrimitivesKernel(
   int min_tile_y = primitive->min_y / C3D_TILE_SIZE;
   int max_tile_x = primitive->max_x / C3D_TILE_SIZE;
   int max_tile_y = primitive->max_y / C3D_TILE_SIZE;
-  for (int tile_y = min_tile_y; tile_y <= max_tile_y; ++tile_y) {
-    for (int tile_x = min_tile_x; tile_x <= max_tile_x; ++tile_x) {
+  for (int tile_y = min_tile_y; tile_y <= max_tile_y; ++tile_y)
+  {
+    for (int tile_x = min_tile_x; tile_x <= max_tile_x; ++tile_x)
+    {
       atomicAdd(&tile_counts[(tile_y * (int)tiles_x) + tile_x], 1u);
     }
   }
@@ -673,14 +751,17 @@ static __global__ void c3dScatterLinePrimitivesKernel(
     size_t primitive_count,
     size_t tiles_x,
     uint32_t* tile_offsets,
-    uint32_t* tile_indices) {
+    uint32_t* tile_indices)
+{
   size_t primitive_index = ((size_t)blockIdx.x * (size_t)blockDim.x) + (size_t)threadIdx.x;
-  if (primitive_index >= primitive_count) {
+  if (primitive_index >= primitive_count)
+  {
     return;
   }
 
   const C3DLinePrimitive* primitive = &primitives[primitive_index];
-  if (!primitive->valid) {
+  if (!primitive->valid)
+  {
     return;
   }
 
@@ -688,8 +769,10 @@ static __global__ void c3dScatterLinePrimitivesKernel(
   int min_tile_y = primitive->min_y / C3D_TILE_SIZE;
   int max_tile_x = primitive->max_x / C3D_TILE_SIZE;
   int max_tile_y = primitive->max_y / C3D_TILE_SIZE;
-  for (int tile_y = min_tile_y; tile_y <= max_tile_y; ++tile_y) {
-    for (int tile_x = min_tile_x; tile_x <= max_tile_x; ++tile_x) {
+  for (int tile_y = min_tile_y; tile_y <= max_tile_y; ++tile_y)
+  {
+    for (int tile_x = min_tile_x; tile_x <= max_tile_x; ++tile_x)
+    {
       uint32_t tile_index = (uint32_t)((tile_y * (int)tiles_x) + tile_x);
       uint32_t offset = atomicAdd(&tile_offsets[tile_index], 1u);
       tile_indices[offset] = (uint32_t)primitive_index;
@@ -702,14 +785,17 @@ static __global__ void c3dScatterTrianglePrimitivesKernel(
     size_t primitive_count,
     size_t tiles_x,
     uint32_t* tile_offsets,
-    uint32_t* tile_indices) {
+    uint32_t* tile_indices)
+{
   size_t primitive_index = ((size_t)blockIdx.x * (size_t)blockDim.x) + (size_t)threadIdx.x;
-  if (primitive_index >= primitive_count) {
+  if (primitive_index >= primitive_count)
+  {
     return;
   }
 
   const C3DTrianglePrimitive* primitive = &primitives[primitive_index];
-  if (!primitive->valid) {
+  if (!primitive->valid)
+  {
     return;
   }
 
@@ -717,8 +803,10 @@ static __global__ void c3dScatterTrianglePrimitivesKernel(
   int min_tile_y = primitive->min_y / C3D_TILE_SIZE;
   int max_tile_x = primitive->max_x / C3D_TILE_SIZE;
   int max_tile_y = primitive->max_y / C3D_TILE_SIZE;
-  for (int tile_y = min_tile_y; tile_y <= max_tile_y; ++tile_y) {
-    for (int tile_x = min_tile_x; tile_x <= max_tile_x; ++tile_x) {
+  for (int tile_y = min_tile_y; tile_y <= max_tile_y; ++tile_y)
+  {
+    for (int tile_x = min_tile_x; tile_x <= max_tile_x; ++tile_x)
+    {
       uint32_t tile_index = (uint32_t)((tile_y * (int)tiles_x) + tile_x);
       uint32_t offset = atomicAdd(&tile_offsets[tile_index], 1u);
       tile_indices[offset] = (uint32_t)primitive_index;
@@ -736,12 +824,14 @@ static __global__ void c3dRasterizeLinesKernel(
     const C3DLinePrimitive* primitives,
     size_t tiles_x,
     const uint32_t* tile_offsets,
-    const uint32_t* tile_indices) {
+    const uint32_t* tile_indices)
+{
   size_t tile_x = (size_t)blockIdx.x;
   size_t tile_y = (size_t)blockIdx.y;
   size_t x = (tile_x * (size_t)C3D_TILE_SIZE) + (size_t)threadIdx.x;
   size_t y = (tile_y * (size_t)C3D_TILE_SIZE) + (size_t)threadIdx.y;
-  if (x >= target_info.width || y >= target_info.height) {
+  if (x >= target_info.width || y >= target_info.height)
+  {
     return;
   }
 
@@ -757,13 +847,16 @@ static __global__ void c3dRasterizeLinesKernel(
   float py = (float)y + 0.5f;
   const float max_distance_sq = 0.25f;
 
-  for (uint32_t i = start; i < end; ++i) {
+  for (uint32_t i = start; i < end; ++i)
+  {
     const C3DLinePrimitive* primitive = &primitives[tile_indices[i]];
-    if (!primitive->valid) {
+    if (!primitive->valid)
+    {
       continue;
     }
 
-    if ((int)x < primitive->min_x || (int)x > primitive->max_x || (int)y < primitive->min_y || (int)y > primitive->max_y) {
+    if ((int)x < primitive->min_x || (int)x > primitive->max_x || (int)y < primitive->min_y || (int)y > primitive->max_y)
+    {
       continue;
     }
 
@@ -771,7 +864,8 @@ static __global__ void c3dRasterizeLinesKernel(
     float dy = primitive->b.y - primitive->a.y;
     float length_sq = (dx * dx) + (dy * dy);
     float t = 0.0f;
-    if (length_sq > 0.0f) {
+    if (length_sq > 0.0f)
+    {
       t = (((px - primitive->a.x) * dx) + ((py - primitive->a.y) * dy)) / length_sq;
       t = c3dClampf(t, 0.0f, 1.0f);
     }
@@ -781,20 +875,23 @@ static __global__ void c3dRasterizeLinesKernel(
     float ddx = px - sx;
     float ddy = py - sy;
     float distance_sq = (ddx * ddx) + (ddy * ddy);
-    if (distance_sq > max_distance_sq) {
+    if (distance_sq > max_distance_sq)
+    {
       continue;
     }
 
     C3DVertexSample sample = c3dLerpVertex(&primitive->a, &primitive->b, t);
     uint64_t key = c3dEncodeDepthOrder(c3dSampleDepth(&sample), primitive->order);
-    if (key < best_key) {
+    if (key < best_key)
+    {
       best_key = key;
       best_sample = sample;
       has_candidate = true;
     }
   }
 
-  if (has_candidate) {
+  if (has_candidate)
+  {
     depth_buffer[pixel_index] = best_key;
     c3dShadePixel(target_info, pixels, blend_mode, texture_views, texture_count, x, y, &best_sample);
   }
@@ -810,12 +907,14 @@ static __global__ void c3dRasterizeTrianglesKernel(
     const C3DTrianglePrimitive* primitives,
     size_t tiles_x,
     const uint32_t* tile_offsets,
-    const uint32_t* tile_indices) {
+    const uint32_t* tile_indices)
+{
   size_t tile_x = (size_t)blockIdx.x;
   size_t tile_y = (size_t)blockIdx.y;
   size_t x = (tile_x * (size_t)C3D_TILE_SIZE) + (size_t)threadIdx.x;
   size_t y = (tile_y * (size_t)C3D_TILE_SIZE) + (size_t)threadIdx.y;
-  if (x >= target_info.width || y >= target_info.height) {
+  if (x >= target_info.width || y >= target_info.height)
+  {
     return;
   }
 
@@ -830,13 +929,16 @@ static __global__ void c3dRasterizeTrianglesKernel(
   float px = (float)x + 0.5f;
   float py = (float)y + 0.5f;
 
-  for (uint32_t i = start; i < end; ++i) {
+  for (uint32_t i = start; i < end; ++i)
+  {
     const C3DTrianglePrimitive* primitive = &primitives[tile_indices[i]];
-    if (!primitive->valid) {
+    if (!primitive->valid)
+    {
       continue;
     }
 
-    if ((int)x < primitive->min_x || (int)x > primitive->max_x || (int)y < primitive->min_y || (int)y > primitive->max_y) {
+    if ((int)x < primitive->min_x || (int)x > primitive->max_x || (int)y < primitive->min_y || (int)y > primitive->max_y)
+    {
       continue;
     }
 
@@ -844,7 +946,8 @@ static __global__ void c3dRasterizeTrianglesKernel(
     float w1 = c3dEdge(primitive->c.x, primitive->c.y, primitive->a.x, primitive->a.y, px, py);
     float w2 = c3dEdge(primitive->a.x, primitive->a.y, primitive->b.x, primitive->b.y, px, py);
     bool inside = primitive->area > 0.0f ? (w0 >= 0.0f && w1 >= 0.0f && w2 >= 0.0f) : (w0 <= 0.0f && w1 <= 0.0f && w2 <= 0.0f);
-    if (!inside) {
+    if (!inside)
+    {
       continue;
     }
 
@@ -859,7 +962,8 @@ static __global__ void c3dRasterizeTrianglesKernel(
     float pwb = wb * inv_wb;
     float pwc = wc * inv_wc;
     float denom = pwa + pwb + pwc;
-    if (denom == 0.0f) {
+    if (denom == 0.0f)
+    {
       continue;
     }
 
@@ -877,40 +981,47 @@ static __global__ void c3dRasterizeTrianglesKernel(
     sample.texid = primitive->a.texid >= 0 ? primitive->a.texid : (primitive->b.texid >= 0 ? primitive->b.texid : primitive->c.texid);
 
     uint64_t key = c3dEncodeDepthOrder(c3dSampleDepth(&sample), primitive->order);
-    if (key < best_key) {
+    if (key < best_key)
+    {
       best_key = key;
       best_sample = sample;
       has_candidate = true;
     }
   }
 
-  if (has_candidate) {
+  if (has_candidate)
+  {
     depth_buffer[pixel_index] = best_key;
     c3dShadePixel(target_info, pixels, blend_mode, texture_views, texture_count, x, y, &best_sample);
   }
 }
 
-static bool c3dBuildTextureViews(C3DCommandBuffer* command_buffer, const C3DRenderPassInfo* render_pass, C3DTextureView** texture_views) {
+static bool c3dBuildTextureViews(C3DCommandBuffer* command_buffer, const C3DRenderPassInfo* render_pass, C3DTextureView** texture_views)
+{
   *texture_views = nullptr;
-  if (render_pass->textureBindCount == 0) {
+  if (render_pass->textureBindCount == 0)
+  {
     return true;
   }
 
   C3DTextureView* host_texture_views = (C3DTextureView*)malloc(render_pass->textureBindCount * sizeof(C3DTextureView));
-  if (!host_texture_views) {
+  if (!host_texture_views)
+  {
     c3dThrowError(C3D_ERROR_OUT_OF_MEMORY, "failed to allocate host texture view metadata");
     return false;
   }
 
   size_t required_bytes = render_pass->textureBindCount * sizeof(C3DTextureView);
-  if (!c3dTryResizeDeviceBuffer(&command_buffer->texture_views, &command_buffer->texture_view_cap, required_bytes, "cudaMalloc failed while allocating texture view metadata")) {
+  if (!c3dTryResizeDeviceBuffer(&command_buffer->texture_views, &command_buffer->texture_view_cap, required_bytes, "cudaMalloc failed while allocating texture view metadata"))
+  {
     free(host_texture_views);
     return false;
   }
 
   *texture_views = (C3DTextureView*)command_buffer->texture_views;
 
-  for (size_t i = 0; i < render_pass->textureBindCount; ++i) {
+  for (size_t i = 0; i < render_pass->textureBindCount; ++i)
+  {
     const C3DTextureBinding* binding = &render_pass->textureBindings[i];
     host_texture_views[i].pixels = (const uint8_t*)binding->texture->data;
     host_texture_views[i].width = binding->texture->info.width;
@@ -926,8 +1037,10 @@ static bool c3dBuildTextureViews(C3DCommandBuffer* command_buffer, const C3DRend
   return success;
 }
 
-static size_t c3dGetPrimitiveCount(const C3DDrawInfo* draw_info) {
-  switch (draw_info->topology) {
+static size_t c3dGetPrimitiveCount(const C3DDrawInfo* draw_info)
+{
+  switch (draw_info->topology)
+  {
     case C3D_TOPOLOGY_LINE:
       return draw_info->count / 2;
     case C3D_TOPOLOGY_QUAD:
@@ -946,38 +1059,47 @@ static bool c3dBuildTileBins(
     bool triangles,
     const void* primitives,
     size_t* tiles_x_out,
-    size_t* tiles_y_out) {
+    size_t* tiles_y_out)
+{
   size_t tiles_x = (target_info.width + (size_t)C3D_TILE_SIZE - 1) / (size_t)C3D_TILE_SIZE;
   size_t tiles_y = (target_info.height + (size_t)C3D_TILE_SIZE - 1) / (size_t)C3D_TILE_SIZE;
   size_t tile_count = tiles_x * tiles_y;
   *tiles_x_out = tiles_x;
   *tiles_y_out = tiles_y;
 
-  if (!c3dTryResizeDeviceBuffer((void**)&command_buffer->tile_counts_device, &command_buffer->tile_count_cap, tile_count * sizeof(uint32_t), "cudaMalloc failed while allocating tile count buffer")) {
+  if (!c3dTryResizeDeviceBuffer((void**)&command_buffer->tile_counts_device, &command_buffer->tile_count_cap, tile_count * sizeof(uint32_t), "cudaMalloc failed while allocating tile count buffer"))
+  {
     return false;
   }
 
-  if (!c3dTryResizeDeviceBuffer((void**)&command_buffer->tile_offsets_device, &command_buffer->tile_offset_cap, (tile_count + 1) * sizeof(uint32_t), "cudaMalloc failed while allocating tile offset buffer")) {
+  if (!c3dTryResizeDeviceBuffer((void**)&command_buffer->tile_offsets_device, &command_buffer->tile_offset_cap, (tile_count + 1) * sizeof(uint32_t), "cudaMalloc failed while allocating tile offset buffer"))
+  {
     return false;
   }
 
-  if (!c3dTryResizeHostBuffer(&command_buffer->tile_counts_host, &command_buffer->tile_counts_host_cap, 1, "failed to allocate host tile total")) {
+  if (!c3dTryResizeHostBuffer(&command_buffer->tile_counts_host, &command_buffer->tile_counts_host_cap, 1, "failed to allocate host tile total"))
+  {
     return false;
   }
 
-  if (!c3dCheckCUDA(cudaMemset(command_buffer->tile_counts_device, 0, tile_count * sizeof(uint32_t)), "cudaMemset failed while clearing tile counts")) {
+  if (!c3dCheckCUDA(cudaMemset(command_buffer->tile_counts_device, 0, tile_count * sizeof(uint32_t)), "cudaMemset failed while clearing tile counts"))
+  {
     return false;
   }
 
   const int bin_threads = 128;
   const int bin_blocks = (int)((primitive_count + (size_t)bin_threads - 1) / (size_t)bin_threads);
-  if (triangles) {
+  if (triangles)
+  {
     c3dBinTrianglePrimitivesKernel<<<bin_blocks, bin_threads>>>((const C3DTrianglePrimitive*)primitives, primitive_count, tiles_x, command_buffer->tile_counts_device);
-  } else {
+  }
+  else
+  {
     c3dBinLinePrimitivesKernel<<<bin_blocks, bin_threads>>>((const C3DLinePrimitive*)primitives, primitive_count, tiles_x, command_buffer->tile_counts_device);
   }
 
-  if (!c3dCheckCUDA(cudaPeekAtLastError(), "tile bin count kernel launch failed")) {
+  if (!c3dCheckCUDA(cudaPeekAtLastError(), "tile bin count kernel launch failed"))
+  {
     return false;
   }
 
@@ -985,9 +1107,11 @@ static bool c3dBuildTileBins(
   const int scan_blocks = (int)((tile_count + (size_t)scan_threads - 1) / (size_t)scan_threads);
   uint32_t* scan_input = command_buffer->tile_counts_device;
   uint32_t* scan_output = command_buffer->tile_offsets_device;
-  for (size_t stride = 1; stride < tile_count; stride *= 2) {
+  for (size_t stride = 1; stride < tile_count; stride *= 2)
+  {
     c3dTileScanStepKernel<<<scan_blocks, scan_threads>>>(scan_input, scan_output, tile_count, stride);
-    if (!c3dCheckCUDA(cudaPeekAtLastError(), "tile scan kernel launch failed")) {
+    if (!c3dCheckCUDA(cudaPeekAtLastError(), "tile scan kernel launch failed"))
+    {
       return false;
     }
 
@@ -997,40 +1121,50 @@ static bool c3dBuildTileBins(
   }
 
   c3dTileExclusiveShiftKernel<<<scan_blocks, scan_threads>>>(scan_input, command_buffer->tile_offsets_device, tile_count);
-  if (!c3dCheckCUDA(cudaPeekAtLastError(), "tile exclusive shift kernel launch failed")) {
+  if (!c3dCheckCUDA(cudaPeekAtLastError(), "tile exclusive shift kernel launch failed"))
+  {
     return false;
   }
 
   c3dFinalizeTileOffsetsKernel<<<1, 1>>>(command_buffer->tile_offsets_device, command_buffer->tile_counts_device, tile_count);
-  if (!c3dCheckCUDA(cudaPeekAtLastError(), "tile offset finalize kernel launch failed")) {
+  if (!c3dCheckCUDA(cudaPeekAtLastError(), "tile offset finalize kernel launch failed"))
+  {
     return false;
   }
 
-  if (!c3dCheckCUDA(cudaMemcpy(command_buffer->tile_counts_host, command_buffer->tile_offsets_device + tile_count, sizeof(uint32_t), cudaMemcpyDeviceToHost), "cudaMemcpy failed while reading tile index count")) {
+  if (!c3dCheckCUDA(cudaMemcpy(command_buffer->tile_counts_host, command_buffer->tile_offsets_device + tile_count, sizeof(uint32_t), cudaMemcpyDeviceToHost), "cudaMemcpy failed while reading tile index count"))
+  {
     return false;
   }
 
   uint32_t total_indices = command_buffer->tile_counts_host[0];
 
-  if (!c3dTryResizeDeviceBuffer((void**)&command_buffer->tile_indices_device, &command_buffer->tile_index_cap, (size_t)total_indices * sizeof(uint32_t), "cudaMalloc failed while allocating tile index buffer")) {
+  if (!c3dTryResizeDeviceBuffer((void**)&command_buffer->tile_indices_device, &command_buffer->tile_index_cap, (size_t)total_indices * sizeof(uint32_t), "cudaMalloc failed while allocating tile index buffer"))
+  {
     return false;
   }
 
-  if (!c3dCheckCUDA(cudaMemcpy(command_buffer->tile_counts_device, command_buffer->tile_offsets_device, tile_count * sizeof(uint32_t), cudaMemcpyDeviceToDevice), "cudaMemcpy failed while preparing tile scatter cursors")) {
+  if (!c3dCheckCUDA(cudaMemcpy(command_buffer->tile_counts_device, command_buffer->tile_offsets_device, tile_count * sizeof(uint32_t), cudaMemcpyDeviceToDevice), "cudaMemcpy failed while preparing tile scatter cursors"))
+  {
     return false;
   }
 
-  if (triangles) {
+  if (triangles)
+  {
     c3dScatterTrianglePrimitivesKernel<<<bin_blocks, bin_threads>>>((const C3DTrianglePrimitive*)primitives, primitive_count, tiles_x, command_buffer->tile_counts_device, command_buffer->tile_indices_device);
-  } else {
+  }
+  else
+  {
     c3dScatterLinePrimitivesKernel<<<bin_blocks, bin_threads>>>((const C3DLinePrimitive*)primitives, primitive_count, tiles_x, command_buffer->tile_counts_device, command_buffer->tile_indices_device);
   }
 
   return c3dCheckCUDA(cudaPeekAtLastError(), "tile scatter kernel launch failed");
 }
 
-static bool c3dExecuteDraw(C3DCommandBuffer* command_buffer, C3DTexture* target, const C3DRenderPassInfo* render_pass, const C3DTextureView* texture_views, const C3DDrawInfo* draw_info, uint64_t* depth_buffer, uint32_t primitive_order_base, uint32_t* primitive_order_count) {
-  if (!c3dValidateDrawRanges(draw_info)) {
+static bool c3dExecuteDraw(C3DCommandBuffer* command_buffer, C3DTexture* target, const C3DRenderPassInfo* render_pass, const C3DTextureView* texture_views, const C3DDrawInfo* draw_info, uint64_t* depth_buffer, uint32_t primitive_order_base, uint32_t* primitive_order_count)
+{
+  if (!c3dValidateDrawRanges(draw_info))
+  {
     return false;
   }
 
@@ -1046,17 +1180,21 @@ static bool c3dExecuteDraw(C3DCommandBuffer* command_buffer, C3DTexture* target,
   size_t tiles_x = 0;
   size_t tiles_y = 0;
 
-  if (draw_info->topology == C3D_TOPOLOGY_LINE) {
-    if ((draw_info->count % 2) != 0) {
+  if (draw_info->topology == C3D_TOPOLOGY_LINE)
+  {
+    if ((draw_info->count % 2) != 0)
+    {
       c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "line draws require an even index count");
       return false;
     }
 
-    if (primitive_count == 0) {
+    if (primitive_count == 0)
+    {
       return true;
     }
 
-    if (!c3dTryResizeDeviceBuffer(&command_buffer->line_primitives, &command_buffer->line_primitive_cap, primitive_count * sizeof(C3DLinePrimitive), "cudaMalloc failed while allocating line primitive buffer")) {
+    if (!c3dTryResizeDeviceBuffer(&command_buffer->line_primitives, &command_buffer->line_primitive_cap, primitive_count * sizeof(C3DLinePrimitive), "cudaMalloc failed while allocating line primitive buffer"))
+    {
       return false;
     }
     C3DLinePrimitive* primitives = (C3DLinePrimitive*)command_buffer->line_primitives;
@@ -1075,10 +1213,12 @@ static bool c3dExecuteDraw(C3DCommandBuffer* command_buffer, C3DTexture* target,
         primitive_count,
         primitive_order_base);
     bool success = c3dCheckCUDA(cudaPeekAtLastError(), "line setup kernel launch failed");
-    if (success) {
+    if (success)
+    {
       success = c3dBuildTileBins(command_buffer, target_info, primitive_count, false, primitives, &tiles_x, &tiles_y);
     }
-    if (success) {
+    if (success)
+    {
       dim3 raster_blocks((unsigned int)tiles_x, (unsigned int)tiles_y);
       c3dRasterizeLinesKernel<<<raster_blocks, raster_threads>>>(
           target_info,
@@ -1096,21 +1236,25 @@ static bool c3dExecuteDraw(C3DCommandBuffer* command_buffer, C3DTexture* target,
     return success;
   }
 
-  if (draw_info->topology == C3D_TOPOLOGY_QUAD && (draw_info->count % 4) != 0) {
+  if (draw_info->topology == C3D_TOPOLOGY_QUAD && (draw_info->count % 4) != 0)
+  {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "quad draws require an index count divisible by four");
     return false;
   }
 
-  if (draw_info->topology == C3D_TOPOLOGY_TRIANGLE && (draw_info->count % 3) != 0) {
+  if (draw_info->topology == C3D_TOPOLOGY_TRIANGLE && (draw_info->count % 3) != 0)
+  {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "triangle draws require an index count divisible by three");
     return false;
   }
 
-  if (primitive_count == 0) {
+  if (primitive_count == 0)
+  {
     return true;
   }
 
-  if (!c3dTryResizeDeviceBuffer(&command_buffer->triangle_primitives, &command_buffer->triangle_primitive_cap, primitive_count * sizeof(C3DTrianglePrimitive), "cudaMalloc failed while allocating triangle primitive buffer")) {
+  if (!c3dTryResizeDeviceBuffer(&command_buffer->triangle_primitives, &command_buffer->triangle_primitive_cap, primitive_count * sizeof(C3DTrianglePrimitive), "cudaMalloc failed while allocating triangle primitive buffer"))
+  {
     return false;
   }
   C3DTrianglePrimitive* primitives = (C3DTrianglePrimitive*)command_buffer->triangle_primitives;
@@ -1130,10 +1274,12 @@ static bool c3dExecuteDraw(C3DCommandBuffer* command_buffer, C3DTexture* target,
       primitive_count,
       primitive_order_base);
   bool success = c3dCheckCUDA(cudaPeekAtLastError(), "triangle setup kernel launch failed");
-  if (success) {
+  if (success)
+  {
     success = c3dBuildTileBins(command_buffer, target_info, primitive_count, true, primitives, &tiles_x, &tiles_y);
   }
-  if (success) {
+  if (success)
+  {
     dim3 raster_blocks((unsigned int)tiles_x, (unsigned int)tiles_y);
     c3dRasterizeTrianglesKernel<<<raster_blocks, raster_threads>>>(
         target_info,
@@ -1151,14 +1297,18 @@ static bool c3dExecuteDraw(C3DCommandBuffer* command_buffer, C3DTexture* target,
   return success;
 }
 
-static bool c3dTryGrowDrawList(C3DCommandBuffer* command_buffer, size_t min_cap) {
-  if (command_buffer->draw_cap >= min_cap) {
+static bool c3dTryGrowDrawList(C3DCommandBuffer* command_buffer, size_t min_cap)
+{
+  if (command_buffer->draw_cap >= min_cap)
+  {
     return true;
   }
 
   size_t new_cap = command_buffer->draw_cap == 0 ? 4 : command_buffer->draw_cap * 2;
-  while (new_cap < min_cap) {
-    if (new_cap > (SIZE_MAX / 2)) {
+  while (new_cap < min_cap)
+  {
+    if (new_cap > (SIZE_MAX / 2))
+    {
       new_cap = min_cap;
       break;
     }
@@ -1166,13 +1316,15 @@ static bool c3dTryGrowDrawList(C3DCommandBuffer* command_buffer, size_t min_cap)
     new_cap *= 2;
   }
 
-  if (new_cap > (SIZE_MAX / sizeof(C3DRecordedDraw))) {
+  if (new_cap > (SIZE_MAX / sizeof(C3DRecordedDraw)))
+  {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "draw list size overflows size_t");
     return false;
   }
 
   C3DRecordedDraw* draws = (C3DRecordedDraw*)realloc(command_buffer->draws, new_cap * sizeof(C3DRecordedDraw));
-  if (!draws) {
+  if (!draws)
+  {
     c3dThrowError(C3D_ERROR_OUT_OF_MEMORY, "failed to grow command buffer draw list");
     return false;
   }
@@ -1182,19 +1334,22 @@ static bool c3dTryGrowDrawList(C3DCommandBuffer* command_buffer, size_t min_cap)
   return true;
 }
 
-static void c3dResetRenderPassInfo(C3DRenderPassInfo* render_pass) {
+static void c3dResetRenderPassInfo(C3DRenderPassInfo* render_pass)
+{
   free(render_pass->textureBindings);
   memset(render_pass, 0, sizeof(*render_pass));
 }
 
-static void c3dResetCommandBuffer(C3DCommandBuffer* command_buffer) {
+static void c3dResetCommandBuffer(C3DCommandBuffer* command_buffer)
+{
   command_buffer->in_render_pass = false;
   command_buffer->has_render_pass = false;
   command_buffer->draw_count = 0;
   c3dResetRenderPassInfo(&command_buffer->render_pass);
 }
 
-static void c3dReleaseCommandBufferScratch(C3DCommandBuffer* command_buffer) {
+static void c3dReleaseCommandBufferScratch(C3DCommandBuffer* command_buffer)
+{
   cudaFree(command_buffer->depth_buffer);
   cudaFree(command_buffer->line_primitives);
   cudaFree(command_buffer->triangle_primitives);
@@ -1224,47 +1379,58 @@ static void c3dReleaseCommandBufferScratch(C3DCommandBuffer* command_buffer) {
   command_buffer->tile_offsets_host_cap = 0;
 }
 
-static bool c3dIsValidSampler(C3DSampler sampler) {
+static bool c3dIsValidSampler(C3DSampler sampler)
+{
   return sampler >= C3D_SAMPLER_POINT_CLAMP && sampler <= C3D_SAMPLER_LINEAR_WRAP;
 }
 
-static bool c3dIsValidTopology(C3DTopology topology) {
+static bool c3dIsValidTopology(C3DTopology topology)
+{
   return topology >= C3D_TOPOLOGY_LINE && topology <= C3D_TOPOLOGY_TRIANGLE;
 }
 
-static bool c3dIsValidBlendMode(C3DBlendMode blend_mode) {
+static bool c3dIsValidBlendMode(C3DBlendMode blend_mode)
+{
   return blend_mode >= C3D_BLEND_MODE_NONE && blend_mode <= C3D_BLEND_MODE_ADDITIVE;
 }
 
-static bool c3dValidateRenderPass(const C3DRenderPassInfo* render_pass) {
-  if (!render_pass) {
+static bool c3dValidateRenderPass(const C3DRenderPassInfo* render_pass)
+{
+  if (!render_pass)
+  {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "render pass info must be non-null");
     return false;
   }
 
-  if (!render_pass->target) {
+  if (!render_pass->target)
+  {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "render pass target must be non-null");
     return false;
   }
 
-  if (!c3dIsValidBlendMode(render_pass->targetBlend)) {
+  if (!c3dIsValidBlendMode(render_pass->targetBlend))
+  {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "render pass blend mode is invalid");
     return false;
   }
 
-  if (render_pass->textureBindCount != 0 && !render_pass->textureBindings) {
+  if (render_pass->textureBindCount != 0 && !render_pass->textureBindings)
+  {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "texture bindings must be non-null when textureBindCount is non-zero");
     return false;
   }
 
-  for (size_t i = 0; i < render_pass->textureBindCount; ++i) {
+  for (size_t i = 0; i < render_pass->textureBindCount; ++i)
+  {
     const C3DTextureBinding* binding = &render_pass->textureBindings[i];
-    if (!binding->texture) {
+    if (!binding->texture)
+    {
       c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "texture binding texture must be non-null");
       return false;
     }
 
-    if (!c3dIsValidSampler(binding->sampler)) {
+    if (!c3dIsValidSampler(binding->sampler))
+    {
       c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "texture binding sampler is invalid");
       return false;
     }
@@ -1273,21 +1439,25 @@ static bool c3dValidateRenderPass(const C3DRenderPassInfo* render_pass) {
   return true;
 }
 
-static bool c3dCopyRenderPassInfo(C3DRenderPassInfo* destination, const C3DRenderPassInfo* source) {
+static bool c3dCopyRenderPassInfo(C3DRenderPassInfo* destination, const C3DRenderPassInfo* source)
+{
   *destination = *source;
   destination->textureBindings = nullptr;
 
-  if (source->textureBindCount == 0) {
+  if (source->textureBindCount == 0)
+  {
     return true;
   }
 
-  if (source->textureBindCount > (SIZE_MAX / sizeof(C3DTextureBinding))) {
+  if (source->textureBindCount > (SIZE_MAX / sizeof(C3DTextureBinding)))
+  {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "texture binding list size overflows size_t");
     return false;
   }
 
   destination->textureBindings = (C3DTextureBinding*)malloc(source->textureBindCount * sizeof(C3DTextureBinding));
-  if (!destination->textureBindings) {
+  if (!destination->textureBindings)
+  {
     c3dThrowError(C3D_ERROR_OUT_OF_MEMORY, "failed to allocate texture binding list");
     return false;
   }
@@ -1296,18 +1466,22 @@ static bool c3dCopyRenderPassInfo(C3DRenderPassInfo* destination, const C3DRende
   return true;
 }
 
-static bool c3dValidateDrawInfo(const C3DDrawInfo* draw_info) {
-  if (!draw_info) {
+static bool c3dValidateDrawInfo(const C3DDrawInfo* draw_info)
+{
+  if (!draw_info)
+  {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "draw info must be non-null");
     return false;
   }
 
-  if (!c3dIsValidTopology(draw_info->topology)) {
+  if (!c3dIsValidTopology(draw_info->topology))
+  {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "draw topology is invalid");
     return false;
   }
 
-  if (!draw_info->indexBuffer || !draw_info->vertexBuffer) {
+  if (!draw_info->indexBuffer || !draw_info->vertexBuffer)
+  {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "draw buffers must be non-null");
     return false;
   }
@@ -1315,18 +1489,23 @@ static bool c3dValidateDrawInfo(const C3DDrawInfo* draw_info) {
   return true;
 }
 
-C3D_API C3DCommandBuffer* c3dCreateCommandBuffer(void) {
-  C3DCommandBuffer* command_buffer = new C3DCommandBuffer {};
-  if (!command_buffer) {
+C3D_API C3DCommandBuffer* c3dCreateCommandBuffer(void)
+{
+  C3DCommandBuffer* command_buffer = (C3DCommandBuffer*)malloc(sizeof(C3DCommandBuffer));
+  if (!command_buffer)
+  {
     c3dThrowError(C3D_ERROR_OUT_OF_MEMORY, "failed to allocate command buffer object");
     return nullptr;
   }
 
+  memset(command_buffer, 0, sizeof(C3DCommandBuffer));
   return command_buffer;
 }
 
-C3D_API bool c3dDeleteCommandBuffer(C3DCommandBuffer* command_buffer) {
-  if (!command_buffer) {
+C3D_API bool c3dDeleteCommandBuffer(C3DCommandBuffer* command_buffer)
+{
+  if (!command_buffer)
+  {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "command buffer must be non-null");
     return false;
   }
@@ -1334,22 +1513,26 @@ C3D_API bool c3dDeleteCommandBuffer(C3DCommandBuffer* command_buffer) {
   c3dResetRenderPassInfo(&command_buffer->render_pass);
   c3dReleaseCommandBufferScratch(command_buffer);
   free(command_buffer->draws);
-  delete command_buffer;
+  free(command_buffer);
   return true;
 }
 
-C3D_API bool c3dSubmitCommandBuffer(C3DCommandBuffer* command_buffer) {
-  if (!command_buffer) {
+C3D_API bool c3dSubmitCommandBuffer(C3DCommandBuffer* command_buffer)
+{
+  if (!command_buffer)
+  {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "command buffer must be non-null");
     return false;
   }
 
-  if (command_buffer->in_render_pass) {
+  if (command_buffer->in_render_pass)
+  {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "cannot submit a command buffer while a render pass is active");
     return false;
   }
 
-  if (!command_buffer->has_render_pass) {
+  if (!command_buffer->has_render_pass)
+  {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "command buffer has no recorded render pass to submit");
     return false;
   }
@@ -1359,12 +1542,14 @@ C3D_API bool c3dSubmitCommandBuffer(C3DCommandBuffer* command_buffer) {
   uint64_t* depth_buffer = nullptr;
   C3DTextureView* texture_views = nullptr;
   bool success = c3dTryResizeDeviceBuffer((void**)&command_buffer->depth_buffer, &command_buffer->depth_cap, pixel_count * sizeof(uint64_t), "cudaMalloc failed while allocating depth buffer");
-  if (success) {
+  if (success)
+  {
     depth_buffer = command_buffer->depth_buffer;
     success = c3dBuildTextureViews(command_buffer, &command_buffer->render_pass, &texture_views);
   }
 
-  if (success) {
+  if (success)
+  {
     const int clear_threads = 256;
     const int clear_blocks = (int)((pixel_count + (size_t)clear_threads - 1) / (size_t)clear_threads);
     c3dClearDepthBufferKernel<<<clear_blocks, clear_threads>>>(depth_buffer, pixel_count);
@@ -1372,10 +1557,13 @@ C3D_API bool c3dSubmitCommandBuffer(C3DCommandBuffer* command_buffer) {
   }
 
   uint32_t primitive_order_base = 0;
-  if (success) {
-    for (size_t i = 0; i < command_buffer->draw_count; ++i) {
+  if (success)
+  {
+    for (size_t i = 0; i < command_buffer->draw_count; ++i)
+    {
       uint32_t primitive_order_count = 0;
-      if (!c3dExecuteDraw(command_buffer, target, &command_buffer->render_pass, texture_views, &command_buffer->draws[i].info, depth_buffer, primitive_order_base, &primitive_order_count)) {
+      if (!c3dExecuteDraw(command_buffer, target, &command_buffer->render_pass, texture_views, &command_buffer->draws[i].info, depth_buffer, primitive_order_base, &primitive_order_count))
+      {
         success = false;
         break;
       }
@@ -1384,11 +1572,13 @@ C3D_API bool c3dSubmitCommandBuffer(C3DCommandBuffer* command_buffer) {
     }
   }
 
-  if (success) {
+  if (success)
+  {
     success = c3dCheckCUDA(cudaDeviceSynchronize(), "render kernel execution failed");
   }
 
-  if (!success) {
+  if (!success)
+  {
     return false;
   }
 
@@ -1396,8 +1586,10 @@ C3D_API bool c3dSubmitCommandBuffer(C3DCommandBuffer* command_buffer) {
   return true;
 }
 
-C3D_API bool c3dCancelCommandBuffer(C3DCommandBuffer* command_buffer) {
-  if (!command_buffer) {
+C3D_API bool c3dCancelCommandBuffer(C3DCommandBuffer* command_buffer)
+{
+  if (!command_buffer)
+  {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "command buffer must be non-null");
     return false;
   }
@@ -1406,23 +1598,28 @@ C3D_API bool c3dCancelCommandBuffer(C3DCommandBuffer* command_buffer) {
   return true;
 }
 
-C3D_API bool c3dBeginRenderPass(C3DCommandBuffer* command_buffer, C3DRenderPassInfo* render_pass) {
-  if (!command_buffer) {
+C3D_API bool c3dBeginRenderPass(C3DCommandBuffer* command_buffer, C3DRenderPassInfo* render_pass)
+{
+  if (!command_buffer)
+  {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "command buffer must be non-null");
     return false;
   }
 
-  if (command_buffer->in_render_pass) {
+  if (command_buffer->in_render_pass)
+  {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "command buffer already has an active render pass");
     return false;
   }
 
-  if (!c3dValidateRenderPass(render_pass)) {
+  if (!c3dValidateRenderPass(render_pass))
+  {
     return false;
   }
 
   c3dResetCommandBuffer(command_buffer);
-  if (!c3dCopyRenderPassInfo(&command_buffer->render_pass, render_pass)) {
+  if (!c3dCopyRenderPassInfo(&command_buffer->render_pass, render_pass))
+  {
     return false;
   }
 
@@ -1431,13 +1628,16 @@ C3D_API bool c3dBeginRenderPass(C3DCommandBuffer* command_buffer, C3DRenderPassI
   return true;
 }
 
-C3D_API bool c3dEndRenderPass(C3DCommandBuffer* command_buffer) {
-  if (!command_buffer) {
+C3D_API bool c3dEndRenderPass(C3DCommandBuffer* command_buffer)
+{
+  if (!command_buffer)
+  {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "command buffer must be non-null");
     return false;
   }
 
-  if (!command_buffer->in_render_pass) {
+  if (!command_buffer->in_render_pass)
+  {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "command buffer has no active render pass");
     return false;
   }
@@ -1446,22 +1646,27 @@ C3D_API bool c3dEndRenderPass(C3DCommandBuffer* command_buffer) {
   return true;
 }
 
-C3D_API bool c3dDraw(C3DCommandBuffer* command_buffer, const C3DDrawInfo* draw_info) {
-  if (!command_buffer) {
+C3D_API bool c3dDraw(C3DCommandBuffer* command_buffer, const C3DDrawInfo* draw_info)
+{
+  if (!command_buffer)
+  {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "command buffer must be non-null");
     return false;
   }
 
-  if (!command_buffer->in_render_pass) {
+  if (!command_buffer->in_render_pass)
+  {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "draw commands require an active render pass");
     return false;
   }
 
-  if (!c3dValidateDrawInfo(draw_info)) {
+  if (!c3dValidateDrawInfo(draw_info))
+  {
     return false;
   }
 
-  if (!c3dTryGrowDrawList(command_buffer, command_buffer->draw_count + 1)) {
+  if (!c3dTryGrowDrawList(command_buffer, command_buffer->draw_count + 1))
+  {
     return false;
   }
 
