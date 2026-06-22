@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <tracy/TracyC.h>
 #include "c3d_internal.h"
 
 struct C3DTextureView
@@ -913,9 +914,11 @@ static __global__ void c3dRasterizeTrianglesKernel(C3DTextureInfo targetInfo, ui
 
 static bool c3dBuildTextureViews(C3DCommandBuffer* commandBuffer, const C3DRenderPassInfo* renderPass, C3DTextureView** textureViews)
 {
+  TracyCZoneN(zone, "c3dBuildTextureViews", 1);
   *textureViews = nullptr;
   if (renderPass->textureBindCount == 0)
   {
+    TracyCZoneEnd(zone);
     return true;
   }
 
@@ -923,6 +926,7 @@ static bool c3dBuildTextureViews(C3DCommandBuffer* commandBuffer, const C3DRende
   if (!hostTextureViews)
   {
     c3dThrowError(C3D_ERROR_OUT_OF_MEMORY, "failed to allocate host texture view metadata");
+    TracyCZoneEnd(zone);
     return false;
   }
 
@@ -930,6 +934,7 @@ static bool c3dBuildTextureViews(C3DCommandBuffer* commandBuffer, const C3DRende
   if (!c3dTryResizeDeviceBuffer(&commandBuffer->textureViews, &commandBuffer->textureViewCap, requiredBytes, "cudaMalloc failed while allocating texture view metadata"))
   {
     free(hostTextureViews);
+    TracyCZoneEnd(zone);
     return false;
   }
 
@@ -947,6 +952,7 @@ static bool c3dBuildTextureViews(C3DCommandBuffer* commandBuffer, const C3DRende
 
   bool success = c3dCheckCUDA(cudaMemcpy(*textureViews, hostTextureViews, renderPass->textureBindCount * sizeof(C3DTextureView), cudaMemcpyHostToDevice), "cudaMemcpy failed while uploading texture view metadata");
   free(hostTextureViews);
+  TracyCZoneEnd(zone);
   return success;
 }
 
@@ -967,6 +973,8 @@ static size_t c3dGetPrimitiveCount(const C3DDrawInfo* drawInfo)
 
 static bool c3dBuildTileBins(C3DCommandBuffer* commandBuffer, C3DTextureInfo targetInfo, C3DViewport viewport, size_t primitiveCount, bool triangles, const void* primitives, size_t* tileBaseXOut, size_t* tileBaseYOut, size_t* tilesXOut, size_t* tilesYOut)
 {
+  TracyCZoneN(zone, "c3dBuildTileBins", 1);
+  TracyCPlotI("C3D Primitive Count", (int64_t)primitiveCount);
   size_t tileBaseX = 0;
   size_t tileBaseY = 0;
   size_t tileMaxX = 0;
@@ -982,26 +990,31 @@ static bool c3dBuildTileBins(C3DCommandBuffer* commandBuffer, C3DTextureInfo tar
 
   if (!c3dTryResizeDeviceBuffer((void**)&commandBuffer->tileCountsDevice, &commandBuffer->tileCountCap, tileCount * sizeof(uint32_t), "cudaMalloc failed while allocating tile count buffer"))
   {
+    TracyCZoneEnd(zone);
     return false;
   }
 
   if (!c3dTryResizeDeviceBuffer((void**)&commandBuffer->tileOffsetsDevice, &commandBuffer->tileOffsetCap, (tileCount + 1) * sizeof(uint32_t), "cudaMalloc failed while allocating tile offset buffer"))
   {
+    TracyCZoneEnd(zone);
     return false;
   }
 
   if (!c3dTryResizeHostBuffer(&commandBuffer->tileCountsHost, &commandBuffer->tileCountsHostCap, 1, "failed to allocate host tile total"))
   {
+    TracyCZoneEnd(zone);
     return false;
   }
 
   if (!c3dTryResizeHostBuffer(&commandBuffer->tileOffsetsHost, &commandBuffer->tileOffsetsHostCap, tileCount + 1, "failed to allocate host tile offsets"))
   {
+    TracyCZoneEnd(zone);
     return false;
   }
 
   if (!c3dCheckCUDA(cudaMemset(commandBuffer->tileCountsDevice, 0, tileCount * sizeof(uint32_t)), "cudaMemset failed while clearing tile counts"))
   {
+    TracyCZoneEnd(zone);
     return false;
   }
 
@@ -1018,11 +1031,13 @@ static bool c3dBuildTileBins(C3DCommandBuffer* commandBuffer, C3DTextureInfo tar
 
   if (!c3dCheckCUDA(cudaPeekAtLastError(), "tile bin count kernel launch failed"))
   {
+    TracyCZoneEnd(zone);
     return false;
   }
 
   if (!c3dCheckCUDA(cudaMemcpy(commandBuffer->tileOffsetsHost, commandBuffer->tileCountsDevice, tileCount * sizeof(uint32_t), cudaMemcpyDeviceToHost), "cudaMemcpy failed while reading tile counts"))
   {
+    TracyCZoneEnd(zone);
     return false;
   }
 
@@ -1039,17 +1054,20 @@ static bool c3dBuildTileBins(C3DCommandBuffer* commandBuffer, C3DTextureInfo tar
 
   if (!c3dCheckCUDA(cudaMemcpy(commandBuffer->tileOffsetsDevice, commandBuffer->tileOffsetsHost, (tileCount + 1) * sizeof(uint32_t), cudaMemcpyHostToDevice), "cudaMemcpy failed while uploading tile offsets"))
   {
+    TracyCZoneEnd(zone);
     return false;
   }
 
   uint32_t totalIndices = commandBuffer->tileCountsHost[0];
   if (!c3dTryResizeDeviceBuffer((void**)&commandBuffer->tileIndicesDevice, &commandBuffer->tileIndexCap, (size_t)totalIndices * sizeof(uint32_t), "cudaMalloc failed while allocating tile index buffer"))
   {
+    TracyCZoneEnd(zone);
     return false;
   }
 
   if (!c3dCheckCUDA(cudaMemcpy(commandBuffer->tileCountsDevice, commandBuffer->tileOffsetsDevice, tileCount * sizeof(uint32_t), cudaMemcpyDeviceToDevice), "cudaMemcpy failed while preparing tile scatter cursors"))
   {
+    TracyCZoneEnd(zone);
     return false;
   }
 
@@ -1062,13 +1080,17 @@ static bool c3dBuildTileBins(C3DCommandBuffer* commandBuffer, C3DTextureInfo tar
     c3dScatterLinePrimitivesKernel<<<binBlocks, binThreads>>>((const C3DLinePrimitive*)primitives, primitiveCount, tileBaseX, tileBaseY, tilesX, commandBuffer->tileCountsDevice, commandBuffer->tileIndicesDevice);
   }
 
-  return c3dCheckCUDA(cudaPeekAtLastError(), "tile scatter kernel launch failed");
+  bool result = c3dCheckCUDA(cudaPeekAtLastError(), "tile scatter kernel launch failed");
+  TracyCZoneEnd(zone);
+  return result;
 }
 
 static bool c3dExecuteDraw(C3DCommandBuffer* commandBuffer, C3DTexture* target, const C3DRenderPassInfo* renderPass, const C3DTextureView* textureViews, const C3DDrawInfo* drawInfo, uint64_t* depthBuffer, uint32_t primitiveOrderBase, uint32_t* primitiveOrderCount)
 {
+  TracyCZoneN(zone, "c3dExecuteDraw", 1);
   if (!c3dValidateDrawRanges(drawInfo))
   {
+    TracyCZoneEnd(zone);
     return false;
   }
 
@@ -1079,6 +1101,7 @@ static bool c3dExecuteDraw(C3DCommandBuffer* commandBuffer, C3DTexture* target, 
   size_t firstIndex = drawInfo->indexOffset / c3dGetIndexStride(drawInfo->indexSize);
   size_t primitiveCount = c3dGetPrimitiveCount(drawInfo);
   *primitiveOrderCount = (uint32_t)primitiveCount;
+  TracyCPlotI("C3D Primitive Count", (int64_t)primitiveCount);
 
   dim3 rasterThreads(C3D_TILE_SIZE, C3D_TILE_SIZE);
   size_t tileBaseX = 0;
@@ -1091,16 +1114,19 @@ static bool c3dExecuteDraw(C3DCommandBuffer* commandBuffer, C3DTexture* target, 
     if ((drawInfo->count % 2) != 0)
     {
       c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "line draws require an even index count");
+      TracyCZoneEnd(zone);
       return false;
     }
 
     if (primitiveCount == 0)
     {
+      TracyCZoneEnd(zone);
       return true;
     }
 
     if (!c3dTryResizeDeviceBuffer(&commandBuffer->linePrimitives, &commandBuffer->linePrimitiveCap, primitiveCount * sizeof(C3DLinePrimitive), "cudaMalloc failed while allocating line primitive buffer"))
     {
+      TracyCZoneEnd(zone);
       return false;
     }
 
@@ -1115,6 +1141,7 @@ static bool c3dExecuteDraw(C3DCommandBuffer* commandBuffer, C3DTexture* target, 
     }
     if (success && commandBuffer->tileCountsHost[0] == 0)
     {
+      TracyCZoneEnd(zone);
       return true;
     }
     if (success)
@@ -1124,28 +1151,33 @@ static bool c3dExecuteDraw(C3DCommandBuffer* commandBuffer, C3DTexture* target, 
       success = c3dCheckCUDA(cudaPeekAtLastError(), "line raster kernel launch failed");
     }
 
+    TracyCZoneEnd(zone);
     return success;
   }
 
   if (drawInfo->topology == C3D_TOPOLOGY_QUAD && (drawInfo->count % 4) != 0)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "quad draws require an index count divisible by four");
+    TracyCZoneEnd(zone);
     return false;
   }
 
   if (drawInfo->topology == C3D_TOPOLOGY_TRIANGLE && (drawInfo->count % 3) != 0)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "triangle draws require an index count divisible by three");
+    TracyCZoneEnd(zone);
     return false;
   }
 
   if (primitiveCount == 0)
   {
+    TracyCZoneEnd(zone);
     return true;
   }
 
   if (!c3dTryResizeDeviceBuffer(&commandBuffer->trianglePrimitives, &commandBuffer->trianglePrimitiveCap, primitiveCount * sizeof(C3DTrianglePrimitive), "cudaMalloc failed while allocating triangle primitive buffer"))
   {
+    TracyCZoneEnd(zone);
     return false;
   }
 
@@ -1160,6 +1192,7 @@ static bool c3dExecuteDraw(C3DCommandBuffer* commandBuffer, C3DTexture* target, 
   }
   if (success && commandBuffer->tileCountsHost[0] == 0)
   {
+    TracyCZoneEnd(zone);
     return true;
   }
   if (success)
@@ -1169,26 +1202,31 @@ static bool c3dExecuteDraw(C3DCommandBuffer* commandBuffer, C3DTexture* target, 
     success = c3dCheckCUDA(cudaPeekAtLastError(), "triangle raster kernel launch failed");
   }
 
+  TracyCZoneEnd(zone);
   return success;
 }
 
 C3D_API bool c3dSubmitCommandBuffer(C3DCommandBuffer* commandBuffer)
 {
+  TracyCZoneN(zone, "c3dSubmitCommandBuffer", 1);
   if (!commandBuffer)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "command buffer must be non-null");
+    TracyCZoneEnd(zone);
     return false;
   }
 
   if (commandBuffer->inRenderPass)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "cannot submit a command buffer while a render pass is active");
+    TracyCZoneEnd(zone);
     return false;
   }
 
   if (!commandBuffer->hasRenderPass)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "command buffer has no recorded render pass to submit");
+    TracyCZoneEnd(zone);
     return false;
   }
 
@@ -1237,9 +1275,11 @@ C3D_API bool c3dSubmitCommandBuffer(C3DCommandBuffer* commandBuffer)
 
   if (!success)
   {
+    TracyCZoneEnd(zone);
     return false;
   }
 
   c3dResetCommandBuffer(commandBuffer);
+  TracyCZoneEnd(zone);
   return true;
 }

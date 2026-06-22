@@ -4,12 +4,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <tracy/TracyC.h>
 #include "c3d_internal.h"
 
 static bool c3dTryGrowDrawList(C3DCommandBuffer* commandBuffer, size_t minCap)
 {
+  TracyCZoneN(zone, "c3dTryGrowDrawList", 1);
   if (commandBuffer->drawCap >= minCap)
   {
+    TracyCZoneEnd(zone);
     return true;
   }
 
@@ -28,6 +31,7 @@ static bool c3dTryGrowDrawList(C3DCommandBuffer* commandBuffer, size_t minCap)
   if (newCap > (SIZE_MAX / sizeof(C3DRecordedDraw)))
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "draw list size overflows size_t");
+    TracyCZoneEnd(zone);
     return false;
   }
 
@@ -35,11 +39,13 @@ static bool c3dTryGrowDrawList(C3DCommandBuffer* commandBuffer, size_t minCap)
   if (!draws)
   {
     c3dThrowError(C3D_ERROR_OUT_OF_MEMORY, "failed to grow command buffer draw list");
+    TracyCZoneEnd(zone);
     return false;
   }
 
   commandBuffer->draws = draws;
   commandBuffer->drawCap = newCap;
+  TracyCZoneEnd(zone);
   return true;
 }
 
@@ -309,22 +315,27 @@ static bool c3dValidateDrawInfo(const C3DDrawInfo* drawInfo)
 
 C3D_API C3DCommandBuffer* c3dCreateCommandBuffer(void)
 {
+  TracyCZoneN(zone, "c3dCreateCommandBuffer", 1);
   C3DCommandBuffer* commandBuffer = (C3DCommandBuffer*)malloc(sizeof(C3DCommandBuffer));
   if (!commandBuffer)
   {
     c3dThrowError(C3D_ERROR_OUT_OF_MEMORY, "failed to allocate command buffer object");
+    TracyCZoneEnd(zone);
     return nullptr;
   }
 
   memset(commandBuffer, 0, sizeof(C3DCommandBuffer));
+  TracyCZoneEnd(zone);
   return commandBuffer;
 }
 
 C3D_API bool c3dDeleteCommandBuffer(C3DCommandBuffer* commandBuffer)
 {
+  TracyCZoneN(zone, "c3dDeleteCommandBuffer", 1);
   if (!commandBuffer)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "command buffer must be non-null");
+    TracyCZoneEnd(zone);
     return false;
   }
 
@@ -332,100 +343,121 @@ C3D_API bool c3dDeleteCommandBuffer(C3DCommandBuffer* commandBuffer)
   c3dReleaseCommandBufferScratch(commandBuffer);
   free(commandBuffer->draws);
   free(commandBuffer);
+  TracyCZoneEnd(zone);
   return true;
 }
 
 C3D_API bool c3dCancelCommandBuffer(C3DCommandBuffer* commandBuffer)
 {
+  TracyCZoneN(zone, "c3dCancelCommandBuffer", 1);
   if (!commandBuffer)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "command buffer must be non-null");
+    TracyCZoneEnd(zone);
     return false;
   }
 
   c3dResetCommandBuffer(commandBuffer);
+  TracyCZoneEnd(zone);
   return true;
 }
 
 C3D_API bool c3dBeginRenderPass(C3DCommandBuffer* commandBuffer, C3DRenderPassInfo* renderPass)
 {
+  TracyCZoneN(zone, "c3dBeginRenderPass", 1);
   if (!commandBuffer)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "command buffer must be non-null");
+    TracyCZoneEnd(zone);
     return false;
   }
 
   if (commandBuffer->inRenderPass)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "command buffer already has an active render pass");
+    TracyCZoneEnd(zone);
     return false;
   }
 
   if (!c3dValidateRenderPass(renderPass))
   {
+    TracyCZoneEnd(zone);
     return false;
   }
 
   C3DRenderPassInfo resolvedRenderPass = *renderPass;
   if (!c3dResolveViewport(renderPass->target, renderPass->viewport, &resolvedRenderPass.viewport))
   {
+    TracyCZoneEnd(zone);
     return false;
   }
 
   c3dResetCommandBuffer(commandBuffer);
   if (!c3dCopyRenderPassInfo(&commandBuffer->renderPass, &resolvedRenderPass))
   {
+    TracyCZoneEnd(zone);
     return false;
   }
 
   commandBuffer->inRenderPass = true;
   commandBuffer->hasRenderPass = true;
+  TracyCZoneEnd(zone);
   return true;
 }
 
 C3D_API bool c3dEndRenderPass(C3DCommandBuffer* commandBuffer)
 {
+  TracyCZoneN(zone, "c3dEndRenderPass", 1);
   if (!commandBuffer)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "command buffer must be non-null");
+    TracyCZoneEnd(zone);
     return false;
   }
 
   if (!commandBuffer->inRenderPass)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "command buffer has no active render pass");
+    TracyCZoneEnd(zone);
     return false;
   }
 
   commandBuffer->inRenderPass = false;
+  TracyCZoneEnd(zone);
   return true;
 }
 
 C3D_API bool c3dDraw(C3DCommandBuffer* commandBuffer, const C3DDrawInfo* drawInfo)
 {
+  TracyCZoneN(zone, "c3dDraw", 1);
   if (!commandBuffer)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "command buffer must be non-null");
+    TracyCZoneEnd(zone);
     return false;
   }
 
   if (!commandBuffer->inRenderPass)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "draw commands require an active render pass");
+    TracyCZoneEnd(zone);
     return false;
   }
 
   if (!c3dValidateDrawInfo(drawInfo))
   {
+    TracyCZoneEnd(zone);
     return false;
   }
 
   if (!c3dTryGrowDrawList(commandBuffer, commandBuffer->drawCount + 1))
   {
+    TracyCZoneEnd(zone);
     return false;
   }
 
   commandBuffer->draws[commandBuffer->drawCount].info = *drawInfo;
   commandBuffer->drawCount += 1;
+  TracyCZoneEnd(zone);
   return true;
 }

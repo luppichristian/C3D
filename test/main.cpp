@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <tracy/TracyC.h>
 #include <windows.h>
 
 typedef struct
@@ -263,14 +264,17 @@ static bool createLineBuffers(void)
 
 static bool initializeRenderState(void)
 {
+  TracyCZoneN(tracy_zone, "initializeRenderState", 1);
   if (g_render_state.initialized)
   {
+    TracyCZoneEnd(tracy_zone);
     return true;
   }
 
   if (!createCheckerTexture() || !createQuadBuffers() || !createLineBuffers())
   {
     destroyRenderState();
+    TracyCZoneEnd(tracy_zone);
     return false;
   }
 
@@ -278,16 +282,19 @@ static bool initializeRenderState(void)
   if (!g_render_state.command_buffer)
   {
     destroyRenderState();
+    TracyCZoneEnd(tracy_zone);
     return false;
   }
 
   if (!ensureStageBufferSize(&g_render_state.quad_upload_stage, sizeof(C3DVertex) * 4) || !ensureStageBufferSize(&g_render_state.line_upload_stage, sizeof(C3DVertex) * 4))
   {
     destroyRenderState();
+    TracyCZoneEnd(tracy_zone);
     return false;
   }
 
   g_render_state.initialized = true;
+  TracyCZoneEnd(tracy_zone);
   return true;
 }
 
@@ -306,9 +313,11 @@ static float getSeconds(void)
 
 static void render(C3DTexture* texture)
 {
+  TracyCZoneN(tracy_zone, "render", 1);
   if (!initializeRenderState())
   {
     clearFallback(texture, 255, 0, 255);
+    TracyCZoneEnd(tracy_zone);
     return;
   }
 
@@ -316,12 +325,14 @@ static void render(C3DTexture* texture)
   if (!c3dGetTextureInfo(texture, &target_info))
   {
     clearFallback(texture, 255, 0, 255);
+    TracyCZoneEnd(tracy_zone);
     return;
   }
 
   if (!ensureDepthTexture(target_info.width, target_info.height))
   {
     clearFallback(texture, 255, 0, 255);
+    TracyCZoneEnd(tracy_zone);
     return;
   }
 
@@ -329,6 +340,7 @@ static void render(C3DTexture* texture)
   if (!c3dClearTexture(texture, clear_color))
   {
     clearFallback(texture, 255, 0, 255);
+    TracyCZoneEnd(tracy_zone);
     return;
   }
 
@@ -381,6 +393,7 @@ static void render(C3DTexture* texture)
   if (!quad_stage_data)
   {
     clearFallback(texture, 255, 32, 32);
+    TracyCZoneEnd(tracy_zone);
     return;
   }
   memcpy(quad_stage_data, quad_vertices, sizeof(quad_vertices));
@@ -389,6 +402,7 @@ static void render(C3DTexture* texture)
   if (!c3dWriteBuffer(g_render_state.quad_vertices, 0, sizeof(quad_vertices), g_render_state.quad_upload_stage, 0))
   {
     clearFallback(texture, 255, 32, 32);
+    TracyCZoneEnd(tracy_zone);
     return;
   }
 
@@ -420,6 +434,7 @@ static void render(C3DTexture* texture)
   if (!line_stage_data)
   {
     clearFallback(texture, 255, 32, 32);
+    TracyCZoneEnd(tracy_zone);
     return;
   }
   memcpy(line_stage_data, line_vertices, sizeof(line_vertices));
@@ -428,6 +443,7 @@ static void render(C3DTexture* texture)
   if (!c3dWriteBuffer(g_render_state.line_vertices, 0, sizeof(line_vertices), g_render_state.line_upload_stage, 0))
   {
     clearFallback(texture, 255, 32, 32);
+    TracyCZoneEnd(tracy_zone);
     return;
   }
 
@@ -449,6 +465,7 @@ static void render(C3DTexture* texture)
   if (!c3dBeginRenderPass(g_render_state.command_buffer, &render_pass))
   {
     clearFallback(texture, 255, 128, 0);
+    TracyCZoneEnd(tracy_zone);
     return;
   }
 
@@ -466,6 +483,7 @@ static void render(C3DTexture* texture)
   {
     c3dCancelCommandBuffer(g_render_state.command_buffer);
     clearFallback(texture, 255, 128, 0);
+    TracyCZoneEnd(tracy_zone);
     return;
   }
 
@@ -483,6 +501,7 @@ static void render(C3DTexture* texture)
   {
     c3dCancelCommandBuffer(g_render_state.command_buffer);
     clearFallback(texture, 255, 128, 0);
+    TracyCZoneEnd(tracy_zone);
     return;
   }
 
@@ -490,6 +509,8 @@ static void render(C3DTexture* texture)
   {
     clearFallback(texture, 255, 255, 0);
   }
+
+  TracyCZoneEnd(tracy_zone);
 }
 
 static LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
@@ -560,6 +581,7 @@ static bool pollMessages(void)
 
 static void presentToWindow(HWND window, C3DTexture* texture, const C3DTextureInfo* info)
 {
+  TracyCZoneN(tracy_zone, "presentToWindow", 1);
   struct
   {
     BITMAPINFOHEADER header;
@@ -579,6 +601,7 @@ static void presentToWindow(HWND window, C3DTexture* texture, const C3DTextureIn
   size_t size = info->width * info->height * 4;
   if (!ensureStageBufferSize(&g_render_state.readback_stage, size) || !c3dReadTexture(texture, 0, size, g_render_state.readback_stage, 0))
   {
+    TracyCZoneEnd(tracy_zone);
     return;
   }
 
@@ -586,6 +609,7 @@ static void presentToWindow(HWND window, C3DTexture* texture, const C3DTextureIn
   buffer = c3dMapStageBuffer(g_render_state.readback_stage, C3D_MEMORY_ACCESS_READ);
   if (!buffer)
   {
+    TracyCZoneEnd(tracy_zone);
     return;
   }
 
@@ -606,6 +630,7 @@ static void presentToWindow(HWND window, C3DTexture* texture, const C3DTextureIn
       SRCCOPY);
   ReleaseDC(window, device_context);
   c3dUnmapStageBuffer(g_render_state.readback_stage);
+  TracyCZoneEnd(tracy_zone);
 }
 
 static void updateWindowTitle(HWND window, LARGE_INTEGER now, LARGE_INTEGER frequency)
@@ -664,6 +689,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR comman
   bool running = true;
   while (running)
   {
+    TracyCFrameMark;
     if (!pollMessages())
     {
       break;

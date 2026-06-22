@@ -4,23 +4,63 @@ id(c3d)
 name("C3D")
 ver(0.1.0)
 
-configs(debug release)
+configs(debug release debug-profile release-profile)
+
+
+filter(
+  debug
+  additional_compile_args("/UTRACY_ENABLE")
+  opt_level(debug)
+  warning_level(high)
+)
+
+filter(
+  release
+  additional_compile_args("/UTRACY_ENABLE")
+  opt_level(speed_3)
+  warning_level(medium)
+)
+
+filter(
+  debug-profile
+  opt_level(debug)
+  warning_level(high)
+  defines(C3D_EXPORT_LIB TRACY_ENABLE)
+)
+
+filter(
+  release-profile
+  opt_level(speed_3)
+  warning_level(medium)
+  defines(C3D_EXPORT_LIB TRACY_ENABLE)
+)
 
 targets(
+  static_lib(
+    id(tracy_client)
+    lang(cpp)
+    repo(
+      link("https://github.com/wolfpld/tracy.git")
+      tag("v0.13.1")
+    )
+    cmake_target(TracyClient)
+  )
+
   dyn_lib(
     id(c3d_lib)
     lang(cuda)
     cuda_architectures("75" "89")
     include_dirs(inc)
     units(src/*.cu)
+    dependencies(tracy_client)
     defines(C3D_EXPORT_LIB)
   )
 
   consoleless(
     id(c3d_test)
-    lang(c)
+    lang(cpp)
     include_dirs(inc)
-    units(test/main.c)
-    dependencies(c3d_lib)
+    units(test/main.cpp)
+    dependencies(c3d_lib tracy_client)
   )
 )
