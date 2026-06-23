@@ -43,14 +43,6 @@ static bool c3dTryResizeHostStorage(uint8_t** data, size_t oldSize, size_t newSi
 
 static bool c3dCheckHostRange(size_t totalSize, size_t offset, size_t size, const void* buffer, const char* desc)
 {
-#if defined(C3D_UNSAFE)
-  (void)totalSize;
-  (void)offset;
-  (void)size;
-  (void)buffer;
-  (void)desc;
-  return true;
-#else
   if (!buffer && size != 0)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "buffer must be non-null when size is non-zero");
@@ -58,7 +50,6 @@ static bool c3dCheckHostRange(size_t totalSize, size_t offset, size_t size, cons
   }
 
   return c3dCheckRange(totalSize, offset, size, desc);
-#endif
 }
 
 static bool c3dIsValidMemoryAccess(C3DMemoryAccess access)
@@ -68,7 +59,6 @@ static bool c3dIsValidMemoryAccess(C3DMemoryAccess access)
 
 C3D_API C3DStageBuffer* c3dCreateStageBuffer(const C3DStageBufferInfo* info)
 {
-#if !defined(C3D_UNSAFE)
   if (!info)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "stage buffer info must be non-null");
@@ -86,7 +76,6 @@ C3D_API C3DStageBuffer* c3dCreateStageBuffer(const C3DStageBufferInfo* info)
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "stage buffer initBuffer must be non-null when initSize is non-zero");
     return nullptr;
   }
-#endif
 
   C3DStageBuffer* stageBuffer = (C3DStageBuffer*)malloc(sizeof(C3DStageBuffer));
   if (!stageBuffer)
@@ -113,13 +102,11 @@ C3D_API C3DStageBuffer* c3dCreateStageBuffer(const C3DStageBufferInfo* info)
 
 C3D_API bool c3dDeleteStageBuffer(C3DStageBuffer* stageBuffer)
 {
-#if !defined(C3D_UNSAFE)
   if (!stageBuffer)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "stage buffer must be non-null");
     return false;
   }
-#endif
 
   if (stageBuffer->data && !c3dCheckCUDA(cudaFreeHost(stageBuffer->data), "cudaFreeHost failed while deleting stage buffer"))
   {
@@ -133,13 +120,11 @@ C3D_API bool c3dDeleteStageBuffer(C3DStageBuffer* stageBuffer)
 
 C3D_API bool c3dResizeStageBuffer(C3DStageBuffer* stageBuffer, size_t size)
 {
-#if !defined(C3D_UNSAFE)
   if (!stageBuffer)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "stage buffer must be non-null");
     return false;
   }
-#endif
 
   if (!c3dTryResizeHostStorage(&stageBuffer->data, stageBuffer->info.size, size, "failed to resize stage buffer storage"))
   {
@@ -157,13 +142,11 @@ C3D_API bool c3dResizeStageBuffer(C3DStageBuffer* stageBuffer, size_t size)
 
 C3D_API bool c3dGetStageBufferInfo(C3DStageBuffer* stageBuffer, C3DStageBufferInfo* info)
 {
-#if !defined(C3D_UNSAFE)
   if (!stageBuffer || !info)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "stage buffer and info output must be non-null");
     return false;
   }
-#endif
 
   *info = stageBuffer->info;
   return true;
@@ -171,13 +154,11 @@ C3D_API bool c3dGetStageBufferInfo(C3DStageBuffer* stageBuffer, C3DStageBufferIn
 
 C3D_API bool c3dReadStageBuffer(C3DStageBuffer* stageBuffer, size_t offset, size_t size, void* buffer)
 {
-#if !defined(C3D_UNSAFE)
   if (!stageBuffer)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "stage buffer must be non-null");
     return false;
   }
-#endif
 
   if (!c3dCheckHostRange(stageBuffer->info.size, offset, size, buffer, "stage buffer read range is out of bounds"))
   {
@@ -194,13 +175,11 @@ C3D_API bool c3dReadStageBuffer(C3DStageBuffer* stageBuffer, size_t offset, size
 
 C3D_API bool c3dWriteStageBuffer(C3DStageBuffer* stageBuffer, size_t offset, size_t size, const void* buffer)
 {
-#if !defined(C3D_UNSAFE)
   if (!stageBuffer)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "stage buffer must be non-null");
     return false;
   }
-#endif
 
   if (!c3dCheckHostRange(stageBuffer->info.size, offset, size, buffer, "stage buffer write range is out of bounds"))
   {
@@ -217,7 +196,6 @@ C3D_API bool c3dWriteStageBuffer(C3DStageBuffer* stageBuffer, size_t offset, siz
 
 C3D_API void* c3dMapStageBuffer(C3DStageBuffer* stageBuffer, C3DMemoryAccess access)
 {
-#if !defined(C3D_UNSAFE)
   if (!stageBuffer)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "stage buffer must be non-null");
@@ -229,7 +207,6 @@ C3D_API void* c3dMapStageBuffer(C3DStageBuffer* stageBuffer, C3DMemoryAccess acc
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "stage buffer access mode is invalid");
     return nullptr;
   }
-#endif
 
   stageBuffer->mapped = true;
   stageBuffer->access = access;
@@ -238,13 +215,11 @@ C3D_API void* c3dMapStageBuffer(C3DStageBuffer* stageBuffer, C3DMemoryAccess acc
 
 C3D_API bool c3dUnmapStageBuffer(C3DStageBuffer* stageBuffer)
 {
-#if !defined(C3D_UNSAFE)
   if (!stageBuffer)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "stage buffer must be non-null");
     return false;
   }
-#endif
 
   stageBuffer->mapped = false;
   stageBuffer->access = C3D_MEMORY_ACCESS_READ_WRITE;

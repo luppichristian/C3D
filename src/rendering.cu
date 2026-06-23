@@ -399,10 +399,6 @@ static __host__ __device__ size_t c3dReadIndexValueRaw(const uint8_t* indexData,
 
 static bool c3dValidateDrawRanges(const C3DDrawInfo* drawInfo)
 {
-#if defined(C3D_UNSAFE)
-  (void)drawInfo;
-  return true;
-#else
   size_t indexStride = c3dGetIndexStride(drawInfo->indexSize);
   if (indexStride == 0)
   {
@@ -432,7 +428,6 @@ static bool c3dValidateDrawRanges(const C3DDrawInfo* drawInfo)
   }
 
   return true;
-#endif
 }
 
 static __device__ C3DVertexSample c3dLoadVertexRaw(const uint8_t* indexData, C3DIndexSize indexSize, size_t firstIndex, size_t drawIndex, size_t indexBase, const C3DVertex* vertexData, size_t vertexOffset)
@@ -1034,7 +1029,7 @@ static bool c3dBuildTileBins(C3DCommandBuffer* commandBuffer, C3DTextureInfo tar
     c3dBinLinePrimitivesKernel<<<binBlocks, binThreads>>>((const C3DLinePrimitive*)primitives, primitiveCount, tileBaseX, tileBaseY, tilesX, commandBuffer->tileCountsDevice);
   }
 
-  if (!c3dCheckKernelLaunch("tile bin count kernel launch failed"))
+  if (!c3dCheckCUDA(cudaPeekAtLastError(), "tile bin count kernel launch failed"))
   {
     TracyCZoneEnd(zone);
     return false;
@@ -1085,7 +1080,7 @@ static bool c3dBuildTileBins(C3DCommandBuffer* commandBuffer, C3DTextureInfo tar
     c3dScatterLinePrimitivesKernel<<<binBlocks, binThreads>>>((const C3DLinePrimitive*)primitives, primitiveCount, tileBaseX, tileBaseY, tilesX, commandBuffer->tileCountsDevice, commandBuffer->tileIndicesDevice);
   }
 
-  bool result = c3dCheckKernelLaunch("tile scatter kernel launch failed");
+  bool result = c3dCheckCUDA(cudaPeekAtLastError(), "tile scatter kernel launch failed");
   TracyCZoneEnd(zone);
   return result;
 }
@@ -1139,7 +1134,7 @@ static bool c3dExecuteDraw(C3DCommandBuffer* commandBuffer, C3DTexture* target, 
     const int setupThreads = 128;
     const int setupBlocks = (int)((primitiveCount + (size_t)setupThreads - 1) / (size_t)setupThreads);
     c3dSetupLinePrimitivesKernel<<<setupBlocks, setupThreads>>>(primitives, targetInfo, renderPass->viewport, indexData, drawInfo->indexSize, firstIndex, drawInfo->indexBase, vertexData, drawInfo->vertexOffset, primitiveCount, primitiveOrderBase);
-    bool success = c3dCheckKernelLaunch("line setup kernel launch failed");
+    bool success = c3dCheckCUDA(cudaPeekAtLastError(), "line setup kernel launch failed");
     if (success)
     {
       success = c3dBuildTileBins(commandBuffer, targetInfo, renderPass->viewport, primitiveCount, false, primitives, &tileBaseX, &tileBaseY, &tilesX, &tilesY);
@@ -1153,7 +1148,7 @@ static bool c3dExecuteDraw(C3DCommandBuffer* commandBuffer, C3DTexture* target, 
     {
       dim3 rasterBlocks((unsigned int)tilesX, (unsigned int)tilesY);
       c3dRasterizeLinesKernel<<<rasterBlocks, rasterThreads>>>(targetInfo, pixels, depthBuffer, renderPass->targetBlend, textureViews, renderPass->textureBindCount, primitives, tileBaseX, tileBaseY, tilesX, commandBuffer->tileOffsetsDevice, commandBuffer->tileIndicesDevice);
-      success = c3dCheckKernelLaunch("line raster kernel launch failed");
+      success = c3dCheckCUDA(cudaPeekAtLastError(), "line raster kernel launch failed");
     }
 
     TracyCZoneEnd(zone);
@@ -1190,7 +1185,7 @@ static bool c3dExecuteDraw(C3DCommandBuffer* commandBuffer, C3DTexture* target, 
   const int setupThreads = 128;
   const int setupBlocks = (int)((primitiveCount + (size_t)setupThreads - 1) / (size_t)setupThreads);
   c3dSetupTrianglePrimitivesKernel<<<setupBlocks, setupThreads>>>(primitives, targetInfo, renderPass->viewport, drawInfo->topology, indexData, drawInfo->indexSize, firstIndex, drawInfo->indexBase, vertexData, drawInfo->vertexOffset, primitiveCount, primitiveOrderBase);
-  bool success = c3dCheckKernelLaunch("triangle setup kernel launch failed");
+  bool success = c3dCheckCUDA(cudaPeekAtLastError(), "triangle setup kernel launch failed");
   if (success)
   {
     success = c3dBuildTileBins(commandBuffer, targetInfo, renderPass->viewport, primitiveCount, true, primitives, &tileBaseX, &tileBaseY, &tilesX, &tilesY);
@@ -1204,7 +1199,7 @@ static bool c3dExecuteDraw(C3DCommandBuffer* commandBuffer, C3DTexture* target, 
   {
     dim3 rasterBlocks((unsigned int)tilesX, (unsigned int)tilesY);
     c3dRasterizeTrianglesKernel<<<rasterBlocks, rasterThreads>>>(targetInfo, pixels, depthBuffer, renderPass->targetBlend, textureViews, renderPass->textureBindCount, primitives, tileBaseX, tileBaseY, tilesX, commandBuffer->tileOffsetsDevice, commandBuffer->tileIndicesDevice);
-    success = c3dCheckKernelLaunch("triangle raster kernel launch failed");
+    success = c3dCheckCUDA(cudaPeekAtLastError(), "triangle raster kernel launch failed");
   }
 
   TracyCZoneEnd(zone);
@@ -1254,7 +1249,7 @@ C3D_API bool c3dSubmitCommandBuffer(C3DCommandBuffer* commandBuffer)
     dim3 clearThreads(C3D_TILE_SIZE, C3D_TILE_SIZE);
     dim3 clearBlocks((unsigned int)((target->info.width + (size_t)clearThreads.x - 1) / (size_t)clearThreads.x), (unsigned int)((target->info.height + (size_t)clearThreads.y - 1) / (size_t)clearThreads.y));
     c3dClearDepthBufferKernel<<<clearBlocks, clearThreads>>>(depthBuffer, target->info.width, target->info.height);
-    success = c3dCheckKernelLaunch("depth clear kernel launch failed");
+    success = c3dCheckCUDA(cudaPeekAtLastError(), "depth clear kernel launch failed");
   }
 
   uint32_t primitiveOrderBase = 0;
@@ -1275,7 +1270,7 @@ C3D_API bool c3dSubmitCommandBuffer(C3DCommandBuffer* commandBuffer)
 
   if (success)
   {
-    success = c3dCheckKernelExecution("render kernel execution failed");
+    success = c3dCheckCUDA(cudaDeviceSynchronize(), "render kernel execution failed");
   }
 
   if (!success)
