@@ -3,15 +3,14 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <condition_variable>
 #include <mutex>
-#include <thread>
 #include "c3d_internal.h"
 
 typedef enum
 {
   C3D_SWAPCHAIN_SLOT_FREE = 0,
   C3D_SWAPCHAIN_SLOT_ACQUIRED,
+  C3D_SWAPCHAIN_SLOT_COPYING,
   C3D_SWAPCHAIN_SLOT_READY,
   C3D_SWAPCHAIN_SLOT_PRESENTING,
 } C3DSwapchainSlotState;
@@ -20,6 +19,8 @@ typedef struct
 {
   C3DTexture* texture;
   C3DStageBuffer* stageBuffer;
+  cudaStream_t copyStream;
+  cudaEvent_t copyEvent;
   uint64_t sequence;
   C3DSwapchainSlotState state;
 } C3DSwapchainSlot;
@@ -27,10 +28,7 @@ typedef struct
 struct C3DSwapchain
 {
   C3DSwapchainInfo info;
-  std::thread presenterThread;
   std::mutex lock;
-  std::condition_variable wakeCondition;
-  bool shutdownRequested;
   C3DSwapchainSlot* slots;
   size_t slotCount;
   size_t acquiredIndex;
@@ -146,6 +144,16 @@ static bool c3dResizeSwapchainSlots(C3DSwapchain* swapchain)
       return false;
     }
 
+    if (!slot->copyStream && !c3dCheckCUDA(cudaStreamCreateWithFlags(&slot->copyStream, cudaStreamNonBlocking), "failed to create swapchain copy stream"))
+    {
+      return false;
+    }
+
+    if (!slot->copyEvent && !c3dCheckCUDA(cudaEventCreateWithFlags(&slot->copyEvent, cudaEventDisableTiming), "failed to create swapchain copy event"))
+    {
+      return false;
+    }
+
     slot->sequence = 0;
     slot->state = C3D_SWAPCHAIN_SLOT_FREE;
   }
@@ -156,7 +164,7 @@ static bool c3dResizeSwapchainSlots(C3DSwapchain* swapchain)
 
 static bool c3dPresentSlotImmediately(C3DSwapchain* swapchain, C3DSwapchainSlot* slot)
 {
-  void* buffer = c3dMapStageBuffer(slot->stageBuffer, C3D_MEMORY_ACCESS_READ);
+  void* buffer = c3dMapStageBuffer(slot->stageBuffer, C3D_MEMORY_ACCESS_READ, false);
   if (!buffer)
   {
     return false;
@@ -174,98 +182,99 @@ static bool c3dPresentSlotImmediately(C3DSwapchain* swapchain, C3DSwapchainSlot*
   return presented;
 }
 
-static void c3dSwapchainThreadProc(C3DSwapchain* swapchain)
+static void c3dUpdateCopyingSlots(C3DSwapchain* swapchain)
 {
-  for (;;)
+  for (size_t i = 0; i < swapchain->slotCount; ++i)
   {
+    C3DSwapchainSlot* slot = &swapchain->slots[i];
+    if (slot->state != C3D_SWAPCHAIN_SLOT_COPYING)
     {
-      std::unique_lock<std::mutex> lock(swapchain->lock);
-      swapchain->wakeCondition.wait(lock, [swapchain]()
-                                    {
-        if (swapchain->shutdownRequested)
-        {
-          return true;
-        }
-
-        for (size_t i = 0; i < swapchain->slotCount; ++i)
-        {
-          if (swapchain->slots[i].state == C3D_SWAPCHAIN_SLOT_READY)
-          {
-            return true;
-          }
-        }
-
-        return false; });
-
-      if (swapchain->shutdownRequested)
-      {
-        return;
-      }
+      continue;
     }
 
-    for (;;)
+    cudaError_t copyStatus = cudaEventQuery(slot->copyEvent);
+    if (copyStatus == cudaSuccess)
     {
-      C3DSwapchainSlot* selected = NULL;
+      slot->state = C3D_SWAPCHAIN_SLOT_READY;
+    }
+    else if (copyStatus != cudaErrorNotReady)
+    {
+      slot->state = C3D_SWAPCHAIN_SLOT_FREE;
+    }
+  }
+}
+
+static bool c3dDrainReadyPresentations(C3DSwapchain* swapchain)
+{
+  std::unique_lock<std::mutex> lock(swapchain->lock);
+  c3dUpdateCopyingSlots(swapchain);
+
+  for (;;)
+  {
+    C3DSwapchainSlot* selected = NULL;
+    for (size_t i = 0; i < swapchain->slotCount; ++i)
+    {
+      C3DSwapchainSlot* slot = &swapchain->slots[i];
+      if (slot->state != C3D_SWAPCHAIN_SLOT_READY)
       {
-        std::unique_lock<std::mutex> lock(swapchain->lock);
-        for (size_t i = 0; i < swapchain->slotCount; ++i)
-        {
-          C3DSwapchainSlot* slot = &swapchain->slots[i];
-          if (slot->state != C3D_SWAPCHAIN_SLOT_READY)
-          {
-            continue;
-          }
-
-          if (!selected)
-          {
-            selected = slot;
-            continue;
-          }
-
-          if (swapchain->info.presentMode == C3D_PRESENT_MODE_FIFO)
-          {
-            if (slot->sequence < selected->sequence)
-            {
-              selected = slot;
-            }
-          }
-          else if (slot->sequence > selected->sequence)
-          {
-            selected = slot;
-          }
-        }
-
-        if (selected && swapchain->info.presentMode != C3D_PRESENT_MODE_FIFO)
-        {
-          for (size_t i = 0; i < swapchain->slotCount; ++i)
-          {
-            C3DSwapchainSlot* slot = &swapchain->slots[i];
-            if (slot != selected && slot->state == C3D_SWAPCHAIN_SLOT_READY)
-            {
-              slot->state = C3D_SWAPCHAIN_SLOT_FREE;
-            }
-          }
-        }
-
-        if (selected)
-        {
-          selected->state = C3D_SWAPCHAIN_SLOT_PRESENTING;
-        }
+        continue;
       }
 
       if (!selected)
       {
-        break;
+        selected = slot;
+        continue;
       }
 
-      c3dPresentSlotImmediately(swapchain, selected);
-
+      if (swapchain->info.presentMode == C3D_PRESENT_MODE_FIFO)
       {
-        std::unique_lock<std::mutex> lock(swapchain->lock);
-        selected->state = C3D_SWAPCHAIN_SLOT_FREE;
+        if (slot->sequence < selected->sequence)
+        {
+          selected = slot;
+        }
       }
-      swapchain->wakeCondition.notify_one();
+      else if (slot->sequence > selected->sequence)
+      {
+        selected = slot;
+      }
     }
+
+    if (selected && swapchain->info.presentMode != C3D_PRESENT_MODE_FIFO)
+    {
+      for (size_t i = 0; i < swapchain->slotCount; ++i)
+      {
+        C3DSwapchainSlot* slot = &swapchain->slots[i];
+        if (slot != selected && slot->state == C3D_SWAPCHAIN_SLOT_READY)
+        {
+          slot->state = C3D_SWAPCHAIN_SLOT_FREE;
+        }
+      }
+    }
+
+    if (!selected)
+    {
+      return true;
+    }
+
+    selected->state = C3D_SWAPCHAIN_SLOT_PRESENTING;
+    lock.unlock();
+
+    if (!c3dCheckCUDA(cudaEventSynchronize(selected->copyEvent), "failed while waiting for swapchain copy completion"))
+    {
+      lock.lock();
+      selected->state = C3D_SWAPCHAIN_SLOT_FREE;
+      return false;
+    }
+
+    bool presented = c3dPresentSlotImmediately(swapchain, selected);
+    lock.lock();
+    selected->state = C3D_SWAPCHAIN_SLOT_FREE;
+    if (!presented)
+    {
+      return false;
+    }
+
+    c3dUpdateCopyingSlots(swapchain);
   }
 }
 
@@ -301,17 +310,6 @@ C3D_API C3DSwapchain* c3dCreateSwapchain(const C3DSwapchainInfo* info)
     return nullptr;
   }
 
-  try
-  {
-    swapchain->presenterThread = std::thread(c3dSwapchainThreadProc, swapchain);
-  }
-  catch (...)
-  {
-    c3dDeleteSwapchain(swapchain);
-    c3dThrowError(C3D_ERROR_OUT_OF_MEMORY, "failed to create swapchain presenter thread");
-    return nullptr;
-  }
-
   return swapchain;
 }
 
@@ -323,21 +321,22 @@ C3D_API bool c3dDeleteSwapchain(C3DSwapchain* swapchain)
     return false;
   }
 
-  {
-    std::unique_lock<std::mutex> lock(swapchain->lock);
-    swapchain->shutdownRequested = true;
-  }
-  swapchain->wakeCondition.notify_one();
-
-  if (swapchain->presenterThread.joinable())
-  {
-    swapchain->presenterThread.join();
-  }
+  c3dDrainReadyPresentations(swapchain);
 
   if (swapchain->slots)
   {
     for (size_t i = 0; i < swapchain->slotCount; ++i)
     {
+      if (swapchain->slots[i].copyEvent)
+      {
+        cudaEventDestroy(swapchain->slots[i].copyEvent);
+      }
+
+      if (swapchain->slots[i].copyStream)
+      {
+        cudaStreamDestroy(swapchain->slots[i].copyStream);
+      }
+
       if (swapchain->slots[i].stageBuffer)
       {
         c3dDeleteStageBuffer(swapchain->slots[i].stageBuffer);
@@ -402,10 +401,16 @@ C3D_API bool c3dAcquireNextTexture(C3DSwapchain* swapchain, C3DTexture** texture
     return false;
   }
 
+  if (!c3dDrainReadyPresentations(swapchain))
+  {
+    return false;
+  }
+
   for (;;)
   {
     size_t selectedIndex = SIZE_MAX;
     std::unique_lock<std::mutex> lock(swapchain->lock);
+    c3dUpdateCopyingSlots(swapchain);
     for (size_t i = 0; i < swapchain->slotCount; ++i)
     {
       if (swapchain->slots[i].state == C3D_SWAPCHAIN_SLOT_FREE)
@@ -462,6 +467,11 @@ C3D_API bool c3dPresentSwapchain(C3DSwapchain* swapchain)
     return false;
   }
 
+  if (!c3dDrainReadyPresentations(swapchain))
+  {
+    return false;
+  }
+
   if (swapchain->acquiredIndex == SIZE_MAX)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "swapchain has no acquired texture to present");
@@ -470,7 +480,17 @@ C3D_API bool c3dPresentSwapchain(C3DSwapchain* swapchain)
 
   C3DSwapchainSlot* slot = &swapchain->slots[swapchain->acquiredIndex];
   size_t size = swapchain->info.width * swapchain->info.height * 4;
-  if (!c3dReadTexture(slot->texture, 0, size, slot->stageBuffer, 0))
+  C3DTextureStorage* textureStorage = c3dGetCurrentTextureStorage(slot->texture);
+  C3DStageBufferStorage* stageStorage = c3dGetCurrentStageStorage(slot->stageBuffer);
+  if (!textureStorage || !stageStorage)
+  {
+    std::unique_lock<std::mutex> lock(swapchain->lock);
+    slot->state = C3D_SWAPCHAIN_SLOT_FREE;
+    swapchain->acquiredIndex = SIZE_MAX;
+    return false;
+  }
+
+  if (!c3dEnqueueSubmissionWait(textureStorage->lastBoundSubmission, slot->copyStream) || !c3dCheckCUDA(cudaMemcpyAsync(stageStorage->data, textureStorage->data, size, cudaMemcpyDeviceToHost, slot->copyStream), "cudaMemcpyAsync failed while reading texture for presentation") || !c3dCheckCUDA(cudaEventRecord(slot->copyEvent, slot->copyStream), "cudaEventRecord failed while queuing presentation copy"))
   {
     std::unique_lock<std::mutex> lock(swapchain->lock);
     slot->state = C3D_SWAPCHAIN_SLOT_FREE;
@@ -483,26 +503,17 @@ C3D_API bool c3dPresentSwapchain(C3DSwapchain* swapchain)
     {
       std::unique_lock<std::mutex> lock(swapchain->lock);
       slot->sequence = ++swapchain->nextSequence;
-      slot->state = C3D_SWAPCHAIN_SLOT_PRESENTING;
+      slot->state = C3D_SWAPCHAIN_SLOT_COPYING;
       swapchain->acquiredIndex = SIZE_MAX;
     }
-
-    bool presented = c3dPresentSlotImmediately(swapchain, slot);
-
-    {
-      std::unique_lock<std::mutex> lock(swapchain->lock);
-      slot->state = C3D_SWAPCHAIN_SLOT_FREE;
-    }
-
-    return presented;
+    return true;
   }
 
   {
     std::unique_lock<std::mutex> lock(swapchain->lock);
     slot->sequence = ++swapchain->nextSequence;
-    slot->state = C3D_SWAPCHAIN_SLOT_READY;
+    slot->state = C3D_SWAPCHAIN_SLOT_COPYING;
     swapchain->acquiredIndex = SIZE_MAX;
   }
-  swapchain->wakeCondition.notify_one();
   return true;
 }

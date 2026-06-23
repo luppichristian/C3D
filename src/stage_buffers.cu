@@ -5,42 +5,6 @@
 #include <string.h>
 #include "c3d_internal.h"
 
-static bool c3dTryResizeHostStorage(uint8_t** data, size_t oldSize, size_t newSize, const char* desc)
-{
-  uint8_t* newData = nullptr;
-  if (newSize != 0)
-  {
-    if (!c3dCheckCUDA(cudaHostAlloc((void**)&newData, newSize, cudaHostAllocDefault), desc))
-    {
-      return false;
-    }
-
-    size_t copySize = oldSize < newSize ? oldSize : newSize;
-    if (*data && copySize != 0)
-    {
-      memcpy(newData, *data, copySize);
-    }
-
-    if (newSize > copySize)
-    {
-      memset(newData + copySize, 0, newSize - copySize);
-    }
-  }
-
-  if (*data && !c3dCheckCUDA(cudaFreeHost(*data), "cudaFreeHost failed while replacing stage buffer storage"))
-  {
-    if (newData)
-    {
-      cudaFreeHost(newData);
-    }
-
-    return false;
-  }
-
-  *data = newData;
-  return true;
-}
-
 static bool c3dCheckHostRange(size_t totalSize, size_t offset, size_t size, const void* buffer, const char* desc)
 {
   if (!buffer && size != 0)
@@ -55,6 +19,22 @@ static bool c3dCheckHostRange(size_t totalSize, size_t offset, size_t size, cons
 static bool c3dIsValidMemoryAccess(C3DMemoryAccess access)
 {
   return access >= C3D_MEMORY_ACCESS_READ && access <= C3D_MEMORY_ACCESS_READ_WRITE;
+}
+
+static void c3dDestroyStageStorageChain(C3DStageBufferStorage* storage)
+{
+  while (storage)
+  {
+    C3DStageBufferStorage* next = storage->next;
+    c3dWaitForSubmission(storage->lastBoundSubmission);
+    if (storage->data)
+    {
+      cudaFreeHost(storage->data);
+    }
+
+    free(storage);
+    storage = next;
+  }
 }
 
 C3D_API C3DStageBuffer* c3dCreateStageBuffer(const C3DStageBufferInfo* info)
@@ -84,17 +64,18 @@ C3D_API C3DStageBuffer* c3dCreateStageBuffer(const C3DStageBufferInfo* info)
     return nullptr;
   }
 
-  memset(stageBuffer, 0, sizeof(C3DStageBuffer));
+  memset(stageBuffer, 0, sizeof(*stageBuffer));
   stageBuffer->info = *info;
-  if (!c3dTryResizeHostStorage(&stageBuffer->data, 0, info->size, "failed to allocate stage buffer storage"))
+  if (!c3dEnsureStageStorageForWrite(stageBuffer, true, &stageBuffer->current))
   {
     free(stageBuffer);
     return nullptr;
   }
 
+  stageBuffer->storages = stageBuffer->current;
   if (info->initSize != 0)
   {
-    memcpy(stageBuffer->data, info->initBuffer, info->initSize);
+    memcpy(stageBuffer->current->data, info->initBuffer, info->initSize);
   }
 
   return stageBuffer;
@@ -108,12 +89,7 @@ C3D_API bool c3dDeleteStageBuffer(C3DStageBuffer* stageBuffer)
     return false;
   }
 
-  if (stageBuffer->data && !c3dCheckCUDA(cudaFreeHost(stageBuffer->data), "cudaFreeHost failed while deleting stage buffer"))
-  {
-    free(stageBuffer);
-    return false;
-  }
-
+  c3dDestroyStageStorageChain(stageBuffer->storages);
   free(stageBuffer);
   return true;
 }
@@ -126,12 +102,16 @@ C3D_API bool c3dResizeStageBuffer(C3DStageBuffer* stageBuffer, size_t size)
     return false;
   }
 
-  if (!c3dTryResizeHostStorage(&stageBuffer->data, stageBuffer->info.size, size, "failed to resize stage buffer storage"))
+  stageBuffer->info.size = size;
+  c3dDestroyStageStorageChain(stageBuffer->storages);
+  stageBuffer->storages = nullptr;
+  stageBuffer->current = nullptr;
+  if (!c3dEnsureStageStorageForWrite(stageBuffer, true, &stageBuffer->current))
   {
     return false;
   }
 
-  stageBuffer->info.size = size;
+  stageBuffer->storages = stageBuffer->current;
   if (size == 0)
   {
     stageBuffer->mapped = false;
@@ -165,15 +145,21 @@ C3D_API bool c3dReadStageBuffer(C3DStageBuffer* stageBuffer, size_t offset, size
     return false;
   }
 
+  C3DStageBufferStorage* storage = c3dGetCurrentStageStorage(stageBuffer);
+  if (!c3dWaitForSubmission(storage ? storage->lastBoundSubmission : 0))
+  {
+    return false;
+  }
+
   if (size != 0)
   {
-    memcpy(buffer, stageBuffer->data + offset, size);
+    memcpy(buffer, storage->data + offset, size);
   }
 
   return true;
 }
 
-C3D_API bool c3dWriteStageBuffer(C3DStageBuffer* stageBuffer, size_t offset, size_t size, const void* buffer)
+C3D_API bool c3dWriteStageBuffer(C3DStageBuffer* stageBuffer, size_t offset, size_t size, const void* buffer, bool cycle)
 {
   if (!stageBuffer)
   {
@@ -186,15 +172,21 @@ C3D_API bool c3dWriteStageBuffer(C3DStageBuffer* stageBuffer, size_t offset, siz
     return false;
   }
 
+  C3DStageBufferStorage* storage = nullptr;
+  if (!c3dEnsureStageStorageForWrite(stageBuffer, cycle, &storage))
+  {
+    return false;
+  }
+
   if (size != 0)
   {
-    memcpy(stageBuffer->data + offset, buffer, size);
+    memcpy(storage->data + offset, buffer, size);
   }
 
   return true;
 }
 
-C3D_API void* c3dMapStageBuffer(C3DStageBuffer* stageBuffer, C3DMemoryAccess access)
+C3D_API void* c3dMapStageBuffer(C3DStageBuffer* stageBuffer, C3DMemoryAccess access, bool cycle)
 {
   if (!stageBuffer)
   {
@@ -208,9 +200,15 @@ C3D_API void* c3dMapStageBuffer(C3DStageBuffer* stageBuffer, C3DMemoryAccess acc
     return nullptr;
   }
 
+  C3DStageBufferStorage* storage = nullptr;
+  if (!c3dEnsureStageStorageForWrite(stageBuffer, cycle, &storage))
+  {
+    return nullptr;
+  }
+
   stageBuffer->mapped = true;
   stageBuffer->access = access;
-  return stageBuffer->data;
+  return storage->data;
 }
 
 C3D_API bool c3dUnmapStageBuffer(C3DStageBuffer* stageBuffer)

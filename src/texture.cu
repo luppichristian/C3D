@@ -2,6 +2,7 @@
 #include <cuda_runtime.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "c3d_internal.h"
 
@@ -20,7 +21,6 @@ static bool c3dTryGetTextureSize(const C3DTextureInfo* info, size_t* size)
   }
 
   size_t depth = info->depth == 0 ? 1 : info->depth;
-
   size_t formatSize = c3dGetTextureFormatSize(info->format);
   if (formatSize == 0)
   {
@@ -139,6 +139,27 @@ static bool c3dTryGetFillTextureArgs(
   return true;
 }
 
+static bool c3dWaitForTextureStorage(C3DTextureStorage* storage)
+{
+  return !storage || c3dWaitForSubmission(storage->lastBoundSubmission);
+}
+
+static void c3dDestroyTextureStorageChain(C3DTextureStorage* storage)
+{
+  while (storage)
+  {
+    C3DTextureStorage* next = storage->next;
+    c3dWaitForTextureStorage(storage);
+    if (storage->data)
+    {
+      cudaFree(storage->data);
+    }
+
+    free(storage);
+    storage = next;
+  }
+}
+
 C3D_API C3DTexture* c3dCreateTexture(const C3DTextureInfo* info)
 {
   size_t size = 0;
@@ -147,7 +168,6 @@ C3D_API C3DTexture* c3dCreateTexture(const C3DTextureInfo* info)
     return nullptr;
   }
 
-  C3DTextureInfo normalizedInfo = c3dNormalizeTextureInfo(*info);
   C3DTexture* texture = (C3DTexture*)malloc(sizeof(C3DTexture));
   if (!texture)
   {
@@ -155,16 +175,23 @@ C3D_API C3DTexture* c3dCreateTexture(const C3DTextureInfo* info)
     return nullptr;
   }
 
-  memset(texture, 0, sizeof(C3DTexture));
-  texture->info = normalizedInfo;
+  memset(texture, 0, sizeof(*texture));
+  texture->info = c3dNormalizeTextureInfo(*info);
   texture->size = size;
-
-  if (!c3dCheckCUDA(cudaMalloc((void**)&texture->data, texture->size), "cudaMalloc failed while creating texture"))
+  if (!c3dEnsureTextureStorageForWrite(texture, true, &texture->current))
   {
     free(texture);
     return nullptr;
   }
 
+  if (!texture->current)
+  {
+    c3dThrowError(C3D_ERROR_OUT_OF_MEMORY, "failed to initialize texture storage");
+    free(texture);
+    return nullptr;
+  }
+
+  texture->storages = texture->current;
   return texture;
 }
 
@@ -176,9 +203,9 @@ C3D_API bool c3dDeleteTexture(C3DTexture* texture)
     return false;
   }
 
-  bool success = c3dCheckCUDA(cudaFree(texture->data), "cudaFree failed while deleting texture");
+  c3dDestroyTextureStorageChain(texture->storages);
   free(texture);
-  return success;
+  return true;
 }
 
 C3D_API bool c3dReadTexture(C3DTexture* texture, size_t textureOffset, size_t size, C3DStageBuffer* stageBuffer, size_t stageOffset)
@@ -189,18 +216,9 @@ C3D_API bool c3dReadTexture(C3DTexture* texture, size_t textureOffset, size_t si
     return false;
   }
 
-  if (size == 0)
-  {
-    return true;
-  }
-
-  return c3dCheckCUDA(cudaMemcpy(stageBuffer->data + stageOffset, texture->data + textureOffset, size, cudaMemcpyDeviceToHost), "cudaMemcpy failed while reading texture");
-}
-
-C3D_API bool c3dWriteTexture(C3DTexture* texture, size_t textureOffset, size_t size, C3DStageBuffer* stageBuffer, size_t stageOffset)
-{
-  if (!c3dCheckTextureRange(texture, textureOffset, size, "texture write range is out of bounds")
-      || !c3dCheckStageRange(stageBuffer, stageOffset, size, "stage buffer read range is out of bounds"))
+  C3DTextureStorage* textureStorage = c3dGetCurrentTextureStorage(texture);
+  C3DStageBufferStorage* stageStorage = c3dGetCurrentStageStorage(stageBuffer);
+  if (!c3dWaitForTextureStorage(textureStorage) || !c3dWaitForSubmission(stageStorage ? stageStorage->lastBoundSubmission : 0))
   {
     return false;
   }
@@ -210,15 +228,49 @@ C3D_API bool c3dWriteTexture(C3DTexture* texture, size_t textureOffset, size_t s
     return true;
   }
 
-  return c3dCheckCUDA(cudaMemcpy(texture->data + textureOffset, stageBuffer->data + stageOffset, size, cudaMemcpyHostToDevice), "cudaMemcpy failed while writing texture");
+  return c3dCheckCUDA(cudaMemcpy(stageStorage->data + stageOffset, textureStorage->data + textureOffset, size, cudaMemcpyDeviceToHost), "cudaMemcpy failed while reading texture");
 }
 
-C3D_API bool c3dFillTexture(C3DTexture* texture, size_t offset, size_t size, void* texel)
+C3D_API bool c3dWriteTexture(C3DTexture* texture, size_t textureOffset, size_t size, C3DStageBuffer* stageBuffer, size_t stageOffset, bool cycle)
+{
+  if (!c3dCheckTextureRange(texture, textureOffset, size, "texture write range is out of bounds")
+      || !c3dCheckStageRange(stageBuffer, stageOffset, size, "stage buffer read range is out of bounds"))
+  {
+    return false;
+  }
+
+  C3DTextureStorage* textureStorage = nullptr;
+  if (!c3dEnsureTextureStorageForWrite(texture, cycle, &textureStorage))
+  {
+    return false;
+  }
+
+  C3DStageBufferStorage* stageStorage = c3dGetCurrentStageStorage(stageBuffer);
+  if (!c3dWaitForSubmission(stageStorage ? stageStorage->lastBoundSubmission : 0))
+  {
+    return false;
+  }
+
+  if (size == 0)
+  {
+    return true;
+  }
+
+  return c3dCheckCUDA(cudaMemcpy(textureStorage->data + textureOffset, stageStorage->data + stageOffset, size, cudaMemcpyHostToDevice), "cudaMemcpy failed while writing texture");
+}
+
+C3D_API bool c3dFillTexture(C3DTexture* texture, size_t offset, size_t size, void* texel, bool cycle)
 {
   uint32_t value = 0;
   size_t texelOffset = 0;
   size_t texelCount = 0;
   if (!c3dTryGetFillTextureArgs(texture, offset, size, texel, &value, &texelOffset, &texelCount))
+  {
+    return false;
+  }
+
+  C3DTextureStorage* storage = nullptr;
+  if (!c3dEnsureTextureStorageForWrite(texture, cycle, &storage))
   {
     return false;
   }
@@ -230,12 +282,11 @@ C3D_API bool c3dFillTexture(C3DTexture* texture, size_t offset, size_t size, voi
 
   const int threadsPerBlock = 256;
   const int blockCount = (int)((texelCount + (size_t)threadsPerBlock - 1) / (size_t)threadsPerBlock);
-  uint32_t* destination = (uint32_t*)texture->data + texelOffset;
-  c3dFillTextureKernel<<<blockCount, threadsPerBlock>>>(destination, texelCount, value);
+  c3dFillTextureKernel<<<blockCount, threadsPerBlock>>>((uint32_t*)storage->data + texelOffset, texelCount, value);
   return c3dCheckCUDA(cudaPeekAtLastError(), "texture fill kernel launch failed") && c3dCheckCUDA(cudaDeviceSynchronize(), "texture fill kernel execution failed");
 }
 
-C3D_API bool c3dClearTexture(C3DTexture* texture, void* texel)
+C3D_API bool c3dClearTexture(C3DTexture* texture, void* texel, bool cycle)
 {
   if (!texture)
   {
@@ -243,7 +294,7 @@ C3D_API bool c3dClearTexture(C3DTexture* texture, void* texel)
     return false;
   }
 
-  return c3dFillTexture(texture, 0, texture->size, texel);
+  return c3dFillTexture(texture, 0, texture->size, texel, cycle);
 }
 
 C3D_API bool c3dGetTextureInfo(C3DTexture* texture, C3DTextureInfo* info)
@@ -278,34 +329,17 @@ C3D_API bool c3dResizeTexture(C3DTexture* texture, size_t width, size_t height, 
   }
 
   info = c3dNormalizeTextureInfo(info);
-
-  uint8_t* newData = nullptr;
-  if (!c3dCheckCUDA(cudaMalloc((void**)&newData, newSize), "cudaMalloc failed while resizing texture"))
-  {
-    return false;
-  }
-
-  size_t copySize = texture->size < newSize ? texture->size : newSize;
-  bool success = true;
-  if (copySize != 0)
-  {
-    success = c3dCheckCUDA(cudaMemcpy(newData, texture->data, copySize, cudaMemcpyDeviceToDevice), "cudaMemcpy failed while resizing texture");
-  }
-
-  if (!success)
-  {
-    cudaFree(newData);
-    return false;
-  }
-
-  if (!c3dCheckCUDA(cudaFree(texture->data), "cudaFree failed while replacing texture storage during resize"))
-  {
-    cudaFree(newData);
-    return false;
-  }
-
-  texture->data = newData;
-  texture->size = newSize;
+  c3dDestroyTextureStorageChain(texture->storages);
+  texture->storages = nullptr;
+  texture->current = nullptr;
   texture->info = info;
+  texture->size = newSize;
+
+  if (!c3dEnsureTextureStorageForWrite(texture, true, &texture->current))
+  {
+    return false;
+  }
+
+  texture->storages = texture->current;
   return true;
 }

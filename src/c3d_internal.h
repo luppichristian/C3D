@@ -8,23 +8,51 @@
 struct C3DTexture
 {
   C3DTextureInfo info;
-  uint8_t* data;
   size_t size;
+  struct C3DTextureStorage* storages;
+  struct C3DTextureStorage* current;
 };
 
 struct C3DBuffer
 {
   C3DBufferInfo info;
-  uint8_t* hostData;
-  uint8_t* deviceData;
+  struct C3DBufferStorage* storages;
+  struct C3DBufferStorage* current;
 };
 
 struct C3DStageBuffer
 {
-  uint8_t* data;
   C3DStageBufferInfo info;
   bool mapped;
   C3DMemoryAccess access;
+  struct C3DStageBufferStorage* storages;
+  struct C3DStageBufferStorage* current;
+};
+
+struct C3DTextureStorage
+{
+  C3DTextureInfo info;
+  uint8_t* data;
+  size_t size;
+  uint64_t lastBoundSubmission;
+  C3DTextureStorage* next;
+};
+
+struct C3DBufferStorage
+{
+  size_t size;
+  uint8_t* hostData;
+  uint8_t* deviceData;
+  uint64_t lastBoundSubmission;
+  C3DBufferStorage* next;
+};
+
+struct C3DStageBufferStorage
+{
+  size_t size;
+  uint8_t* data;
+  uint64_t lastBoundSubmission;
+  C3DStageBufferStorage* next;
 };
 
 struct C3DRecordedDraw
@@ -40,24 +68,6 @@ struct C3DCommandBuffer
   C3DRecordedDraw* draws;
   size_t drawCount;
   size_t drawCap;
-  uint64_t* depthBuffer;
-  size_t depthCap;
-  void* linePrimitives;
-  size_t linePrimitiveCap;
-  void* trianglePrimitives;
-  size_t trianglePrimitiveCap;
-  void* textureViews;
-  size_t textureViewCap;
-  uint32_t* tileCountsDevice;
-  uint32_t* tileOffsetsDevice;
-  uint32_t* tileIndicesDevice;
-  uint32_t* tileCountsHost;
-  uint32_t* tileOffsetsHost;
-  size_t tileCountCap;
-  size_t tileOffsetCap;
-  size_t tileIndexCap;
-  size_t tileCountsHostCap;
-  size_t tileOffsetsHostCap;
 };
 
 static bool c3dCheckCUDA(cudaError_t error, const char* desc)
@@ -111,3 +121,17 @@ static __host__ __device__ size_t c3dGetIndexStride(C3DIndexSize indexSize)
 }
 
 void c3dResetCommandBuffer(C3DCommandBuffer* commandBuffer);
+bool c3dRefreshSubmissionState(void);
+bool c3dRegisterSubmission(uint64_t* serialOut, cudaStream_t stream, void (*cleanup)(void*), void* cleanupContext);
+bool c3dWaitForSubmission(uint64_t serial);
+bool c3dIsSubmissionPending(uint64_t serial);
+bool c3dEnqueueSubmissionWait(uint64_t serial, cudaStream_t stream);
+bool c3dEnsureTextureStorageForWrite(C3DTexture* texture, bool cycle, C3DTextureStorage** storageOut);
+bool c3dEnsureBufferStorageForWrite(C3DBuffer* buffer, bool cycle, C3DBufferStorage** storageOut);
+bool c3dEnsureStageStorageForWrite(C3DStageBuffer* stageBuffer, bool cycle, C3DStageBufferStorage** storageOut);
+C3DTextureStorage* c3dGetCurrentTextureStorage(C3DTexture* texture);
+C3DBufferStorage* c3dGetCurrentBufferStorage(C3DBuffer* buffer);
+C3DStageBufferStorage* c3dGetCurrentStageStorage(C3DStageBuffer* stageBuffer);
+void c3dBindTextureStorage(C3DTextureStorage* storage, uint64_t serial);
+void c3dBindBufferStorage(C3DBufferStorage* storage, uint64_t serial);
+void c3dBindStageStorage(C3DStageBufferStorage* storage, uint64_t serial);

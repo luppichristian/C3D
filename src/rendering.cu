@@ -66,7 +66,60 @@ struct C3DTrianglePrimitive
   int valid;
 };
 
+struct C3DExecutionScratch
+{
+  uint64_t* depthBuffer;
+  size_t depthCap;
+  void* linePrimitives;
+  size_t linePrimitiveCap;
+  void* trianglePrimitives;
+  size_t trianglePrimitiveCap;
+  void* textureViews;
+  size_t textureViewCap;
+  uint32_t* tileCountsDevice;
+  uint32_t* tileOffsetsDevice;
+  uint32_t* tileIndicesDevice;
+  uint32_t* tileCountsHost;
+  uint32_t* tileOffsetsHost;
+  size_t tileCountCap;
+  size_t tileOffsetCap;
+  size_t tileIndexCap;
+  size_t tileCountsHostCap;
+  size_t tileOffsetsHostCap;
+};
+
+struct C3DSubmissionContext
+{
+  cudaStream_t stream;
+  C3DExecutionScratch scratch;
+};
+
 static const int C3D_TILE_SIZE = 16;
+
+static void c3dDestroySubmissionContext(void* value)
+{
+  C3DSubmissionContext* context = (C3DSubmissionContext*)value;
+  if (!context)
+  {
+    return;
+  }
+
+  cudaFree(context->scratch.depthBuffer);
+  cudaFree(context->scratch.linePrimitives);
+  cudaFree(context->scratch.trianglePrimitives);
+  cudaFree(context->scratch.textureViews);
+  cudaFree(context->scratch.tileCountsDevice);
+  cudaFree(context->scratch.tileOffsetsDevice);
+  cudaFree(context->scratch.tileIndicesDevice);
+  free(context->scratch.tileCountsHost);
+  free(context->scratch.tileOffsetsHost);
+  if (context->stream)
+  {
+    cudaStreamDestroy(context->stream);
+  }
+
+  free(context);
+}
 
 static bool c3dTryResizeDeviceBuffer(void** buffer, size_t* cap, size_t requiredBytes, const char* desc)
 {
@@ -416,9 +469,10 @@ static bool c3dValidateDrawRanges(const C3DDrawInfo* drawInfo)
 
   size_t firstIndex = drawInfo->indexOffset / indexStride;
   size_t vertexLimit = drawInfo->vertexBuffer->info.size / sizeof(C3DVertex);
+  C3DBufferStorage* indexStorage = c3dGetCurrentBufferStorage(drawInfo->indexBuffer);
   for (size_t i = 0; i < drawInfo->count; ++i)
   {
-    size_t index = c3dReadIndexValueRaw(drawInfo->indexBuffer->hostData, drawInfo->indexSize, firstIndex + i);
+    size_t index = c3dReadIndexValueRaw(indexStorage->hostData, drawInfo->indexSize, firstIndex + i);
     size_t vertexIndex = drawInfo->vertexOffset + drawInfo->indexBase + index;
     if (vertexIndex >= vertexLimit)
     {
@@ -546,6 +600,19 @@ static __global__ void c3dClearDepthBufferKernel(uint64_t* depthBuffer, size_t w
     size_t index = (y * width) + x;
     depthBuffer[index] = ~0ull;
   }
+}
+
+static __global__ void c3dClearColorTargetKernel(C3DTextureInfo targetInfo, uint8_t* pixels, uint32_t clearValue)
+{
+  size_t x = ((size_t)blockIdx.x * (size_t)blockDim.x) + (size_t)threadIdx.x;
+  size_t y = ((size_t)blockIdx.y * (size_t)blockDim.y) + (size_t)threadIdx.y;
+  if (x >= targetInfo.width || y >= targetInfo.height)
+  {
+    return;
+  }
+
+  uint8_t* texel = c3dGetTargetTexel(targetInfo, pixels, x, y);
+  *((uint32_t*)texel) = clearValue;
 }
 
 static __global__ void c3dSetupLinePrimitivesKernel(C3DLinePrimitive* primitives, C3DTextureInfo targetInfo, C3DViewport viewport, const uint8_t* indexData, C3DIndexSize indexSize, size_t firstIndex, size_t indexBase, const C3DVertex* vertexData, size_t vertexOffset, size_t primitiveCount, uint32_t orderBase)
@@ -912,7 +979,7 @@ static __global__ void c3dRasterizeTrianglesKernel(C3DTextureInfo targetInfo, ui
   }
 }
 
-static bool c3dBuildTextureViews(C3DCommandBuffer* commandBuffer, const C3DRenderPassInfo* renderPass, C3DTextureView** textureViews)
+static bool c3dBuildTextureViews(C3DExecutionScratch* scratch, cudaStream_t stream, const C3DRenderPassInfo* renderPass, C3DTextureView** textureViews)
 {
   TracyCZoneN(zone, "c3dBuildTextureViews", 1);
   *textureViews = nullptr;
@@ -931,26 +998,31 @@ static bool c3dBuildTextureViews(C3DCommandBuffer* commandBuffer, const C3DRende
   }
 
   size_t requiredBytes = renderPass->textureBindCount * sizeof(C3DTextureView);
-  if (!c3dTryResizeDeviceBuffer(&commandBuffer->textureViews, &commandBuffer->textureViewCap, requiredBytes, "cudaMalloc failed while allocating texture view metadata"))
+  if (!c3dTryResizeDeviceBuffer(&scratch->textureViews, &scratch->textureViewCap, requiredBytes, "cudaMalloc failed while allocating texture view metadata"))
   {
     free(hostTextureViews);
     TracyCZoneEnd(zone);
     return false;
   }
 
-  *textureViews = (C3DTextureView*)commandBuffer->textureViews;
+  *textureViews = (C3DTextureView*)scratch->textureViews;
 
   for (size_t i = 0; i < renderPass->textureBindCount; ++i)
   {
     const C3DTextureBinding* binding = &renderPass->textureBindings[i];
-    hostTextureViews[i].pixels = (const uint8_t*)binding->texture->data;
+    C3DTextureStorage* storage = c3dGetCurrentTextureStorage(binding->texture);
+    hostTextureViews[i].pixels = (const uint8_t*)storage->data;
     hostTextureViews[i].width = binding->texture->info.width;
     hostTextureViews[i].height = binding->texture->info.height;
     hostTextureViews[i].format = binding->texture->info.format;
     hostTextureViews[i].sampler = binding->sampler;
   }
 
-  bool success = c3dCheckCUDA(cudaMemcpy(*textureViews, hostTextureViews, renderPass->textureBindCount * sizeof(C3DTextureView), cudaMemcpyHostToDevice), "cudaMemcpy failed while uploading texture view metadata");
+  bool success = c3dCheckCUDA(cudaMemcpyAsync(*textureViews, hostTextureViews, renderPass->textureBindCount * sizeof(C3DTextureView), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync failed while uploading texture view metadata");
+  if (success)
+  {
+    success = c3dCheckCUDA(cudaStreamSynchronize(stream), "cudaStreamSynchronize failed while uploading texture view metadata");
+  }
   free(hostTextureViews);
   TracyCZoneEnd(zone);
   return success;
@@ -971,7 +1043,7 @@ static size_t c3dGetPrimitiveCount(const C3DDrawInfo* drawInfo)
   return 0;
 }
 
-static bool c3dBuildTileBins(C3DCommandBuffer* commandBuffer, C3DTextureInfo targetInfo, C3DViewport viewport, size_t primitiveCount, bool triangles, const void* primitives, size_t* tileBaseXOut, size_t* tileBaseYOut, size_t* tilesXOut, size_t* tilesYOut)
+static bool c3dBuildTileBins(C3DExecutionScratch* scratch, cudaStream_t stream, C3DTextureInfo targetInfo, C3DViewport viewport, size_t primitiveCount, bool triangles, const void* primitives, size_t* tileBaseXOut, size_t* tileBaseYOut, size_t* tilesXOut, size_t* tilesYOut)
 {
   TracyCZoneN(zone, "c3dBuildTileBins", 1);
   TracyCPlotI("C3D Primitive Count", (int64_t)primitiveCount);
@@ -988,31 +1060,31 @@ static bool c3dBuildTileBins(C3DCommandBuffer* commandBuffer, C3DTextureInfo tar
   *tilesXOut = tilesX;
   *tilesYOut = tilesY;
 
-  if (!c3dTryResizeDeviceBuffer((void**)&commandBuffer->tileCountsDevice, &commandBuffer->tileCountCap, tileCount * sizeof(uint32_t), "cudaMalloc failed while allocating tile count buffer"))
+  if (!c3dTryResizeDeviceBuffer((void**)&scratch->tileCountsDevice, &scratch->tileCountCap, tileCount * sizeof(uint32_t), "cudaMalloc failed while allocating tile count buffer"))
   {
     TracyCZoneEnd(zone);
     return false;
   }
 
-  if (!c3dTryResizeDeviceBuffer((void**)&commandBuffer->tileOffsetsDevice, &commandBuffer->tileOffsetCap, (tileCount + 1) * sizeof(uint32_t), "cudaMalloc failed while allocating tile offset buffer"))
+  if (!c3dTryResizeDeviceBuffer((void**)&scratch->tileOffsetsDevice, &scratch->tileOffsetCap, (tileCount + 1) * sizeof(uint32_t), "cudaMalloc failed while allocating tile offset buffer"))
   {
     TracyCZoneEnd(zone);
     return false;
   }
 
-  if (!c3dTryResizeHostBuffer(&commandBuffer->tileCountsHost, &commandBuffer->tileCountsHostCap, 1, "failed to allocate host tile total"))
+  if (!c3dTryResizeHostBuffer(&scratch->tileCountsHost, &scratch->tileCountsHostCap, 1, "failed to allocate host tile total"))
   {
     TracyCZoneEnd(zone);
     return false;
   }
 
-  if (!c3dTryResizeHostBuffer(&commandBuffer->tileOffsetsHost, &commandBuffer->tileOffsetsHostCap, tileCount + 1, "failed to allocate host tile offsets"))
+  if (!c3dTryResizeHostBuffer(&scratch->tileOffsetsHost, &scratch->tileOffsetsHostCap, tileCount + 1, "failed to allocate host tile offsets"))
   {
     TracyCZoneEnd(zone);
     return false;
   }
 
-  if (!c3dCheckCUDA(cudaMemset(commandBuffer->tileCountsDevice, 0, tileCount * sizeof(uint32_t)), "cudaMemset failed while clearing tile counts"))
+  if (!c3dCheckCUDA(cudaMemsetAsync(scratch->tileCountsDevice, 0, tileCount * sizeof(uint32_t), stream), "cudaMemsetAsync failed while clearing tile counts"))
   {
     TracyCZoneEnd(zone);
     return false;
@@ -1022,11 +1094,11 @@ static bool c3dBuildTileBins(C3DCommandBuffer* commandBuffer, C3DTextureInfo tar
   const int binBlocks = (int)((primitiveCount + (size_t)binThreads - 1) / (size_t)binThreads);
   if (triangles)
   {
-    c3dBinTrianglePrimitivesKernel<<<binBlocks, binThreads>>>((const C3DTrianglePrimitive*)primitives, primitiveCount, tileBaseX, tileBaseY, tilesX, commandBuffer->tileCountsDevice);
+    c3dBinTrianglePrimitivesKernel<<<binBlocks, binThreads, 0, stream>>>((const C3DTrianglePrimitive*)primitives, primitiveCount, tileBaseX, tileBaseY, tilesX, scratch->tileCountsDevice);
   }
   else
   {
-    c3dBinLinePrimitivesKernel<<<binBlocks, binThreads>>>((const C3DLinePrimitive*)primitives, primitiveCount, tileBaseX, tileBaseY, tilesX, commandBuffer->tileCountsDevice);
+    c3dBinLinePrimitivesKernel<<<binBlocks, binThreads, 0, stream>>>((const C3DLinePrimitive*)primitives, primitiveCount, tileBaseX, tileBaseY, tilesX, scratch->tileCountsDevice);
   }
 
   if (!c3dCheckCUDA(cudaPeekAtLastError(), "tile bin count kernel launch failed"))
@@ -1035,7 +1107,13 @@ static bool c3dBuildTileBins(C3DCommandBuffer* commandBuffer, C3DTextureInfo tar
     return false;
   }
 
-  if (!c3dCheckCUDA(cudaMemcpy(commandBuffer->tileOffsetsHost, commandBuffer->tileCountsDevice, tileCount * sizeof(uint32_t), cudaMemcpyDeviceToHost), "cudaMemcpy failed while reading tile counts"))
+  if (!c3dCheckCUDA(cudaMemcpyAsync(scratch->tileOffsetsHost, scratch->tileCountsDevice, tileCount * sizeof(uint32_t), cudaMemcpyDeviceToHost, stream), "cudaMemcpyAsync failed while reading tile counts"))
+  {
+    TracyCZoneEnd(zone);
+    return false;
+  }
+
+  if (!c3dCheckCUDA(cudaStreamSynchronize(stream), "cudaStreamSynchronize failed while reading tile counts"))
   {
     TracyCZoneEnd(zone);
     return false;
@@ -1044,28 +1122,28 @@ static bool c3dBuildTileBins(C3DCommandBuffer* commandBuffer, C3DTextureInfo tar
   uint32_t runningCount = 0;
   for (size_t i = 0; i < tileCount; ++i)
   {
-    uint32_t tileCountValue = commandBuffer->tileOffsetsHost[i];
-    commandBuffer->tileOffsetsHost[i] = runningCount;
+    uint32_t tileCountValue = scratch->tileOffsetsHost[i];
+    scratch->tileOffsetsHost[i] = runningCount;
     runningCount += tileCountValue;
   }
 
-  commandBuffer->tileOffsetsHost[tileCount] = runningCount;
-  commandBuffer->tileCountsHost[0] = runningCount;
+  scratch->tileOffsetsHost[tileCount] = runningCount;
+  scratch->tileCountsHost[0] = runningCount;
 
-  if (!c3dCheckCUDA(cudaMemcpy(commandBuffer->tileOffsetsDevice, commandBuffer->tileOffsetsHost, (tileCount + 1) * sizeof(uint32_t), cudaMemcpyHostToDevice), "cudaMemcpy failed while uploading tile offsets"))
+  if (!c3dCheckCUDA(cudaMemcpyAsync(scratch->tileOffsetsDevice, scratch->tileOffsetsHost, (tileCount + 1) * sizeof(uint32_t), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync failed while uploading tile offsets"))
   {
     TracyCZoneEnd(zone);
     return false;
   }
 
-  uint32_t totalIndices = commandBuffer->tileCountsHost[0];
-  if (!c3dTryResizeDeviceBuffer((void**)&commandBuffer->tileIndicesDevice, &commandBuffer->tileIndexCap, (size_t)totalIndices * sizeof(uint32_t), "cudaMalloc failed while allocating tile index buffer"))
+  uint32_t totalIndices = scratch->tileCountsHost[0];
+  if (!c3dTryResizeDeviceBuffer((void**)&scratch->tileIndicesDevice, &scratch->tileIndexCap, (size_t)totalIndices * sizeof(uint32_t), "cudaMalloc failed while allocating tile index buffer"))
   {
     TracyCZoneEnd(zone);
     return false;
   }
 
-  if (!c3dCheckCUDA(cudaMemcpy(commandBuffer->tileCountsDevice, commandBuffer->tileOffsetsDevice, tileCount * sizeof(uint32_t), cudaMemcpyDeviceToDevice), "cudaMemcpy failed while preparing tile scatter cursors"))
+  if (!c3dCheckCUDA(cudaMemcpyAsync(scratch->tileCountsDevice, scratch->tileOffsetsDevice, tileCount * sizeof(uint32_t), cudaMemcpyDeviceToDevice, stream), "cudaMemcpyAsync failed while preparing tile scatter cursors"))
   {
     TracyCZoneEnd(zone);
     return false;
@@ -1073,11 +1151,11 @@ static bool c3dBuildTileBins(C3DCommandBuffer* commandBuffer, C3DTextureInfo tar
 
   if (triangles)
   {
-    c3dScatterTrianglePrimitivesKernel<<<binBlocks, binThreads>>>((const C3DTrianglePrimitive*)primitives, primitiveCount, tileBaseX, tileBaseY, tilesX, commandBuffer->tileCountsDevice, commandBuffer->tileIndicesDevice);
+    c3dScatterTrianglePrimitivesKernel<<<binBlocks, binThreads, 0, stream>>>((const C3DTrianglePrimitive*)primitives, primitiveCount, tileBaseX, tileBaseY, tilesX, scratch->tileCountsDevice, scratch->tileIndicesDevice);
   }
   else
   {
-    c3dScatterLinePrimitivesKernel<<<binBlocks, binThreads>>>((const C3DLinePrimitive*)primitives, primitiveCount, tileBaseX, tileBaseY, tilesX, commandBuffer->tileCountsDevice, commandBuffer->tileIndicesDevice);
+    c3dScatterLinePrimitivesKernel<<<binBlocks, binThreads, 0, stream>>>((const C3DLinePrimitive*)primitives, primitiveCount, tileBaseX, tileBaseY, tilesX, scratch->tileCountsDevice, scratch->tileIndicesDevice);
   }
 
   bool result = c3dCheckCUDA(cudaPeekAtLastError(), "tile scatter kernel launch failed");
@@ -1085,7 +1163,7 @@ static bool c3dBuildTileBins(C3DCommandBuffer* commandBuffer, C3DTextureInfo tar
   return result;
 }
 
-static bool c3dExecuteDraw(C3DCommandBuffer* commandBuffer, C3DTexture* target, const C3DRenderPassInfo* renderPass, const C3DTextureView* textureViews, const C3DDrawInfo* drawInfo, uint64_t* depthBuffer, uint32_t primitiveOrderBase, uint32_t* primitiveOrderCount)
+static bool c3dExecuteDraw(C3DExecutionScratch* scratch, cudaStream_t stream, C3DTextureStorage* targetStorage, const C3DRenderPassInfo* renderPass, const C3DTextureView* textureViews, const C3DDrawInfo* drawInfo, uint64_t* depthBuffer, uint32_t primitiveOrderBase, uint32_t* primitiveOrderCount)
 {
   TracyCZoneN(zone, "c3dExecuteDraw", 1);
   if (!c3dValidateDrawRanges(drawInfo))
@@ -1094,10 +1172,12 @@ static bool c3dExecuteDraw(C3DCommandBuffer* commandBuffer, C3DTexture* target, 
     return false;
   }
 
-  C3DTextureInfo targetInfo = target->info;
-  uint8_t* pixels = (uint8_t*)target->data;
-  const uint8_t* indexData = drawInfo->indexBuffer->deviceData;
-  const C3DVertex* vertexData = (const C3DVertex*)drawInfo->vertexBuffer->deviceData;
+  C3DBufferStorage* indexStorage = c3dGetCurrentBufferStorage(drawInfo->indexBuffer);
+  C3DBufferStorage* vertexStorage = c3dGetCurrentBufferStorage(drawInfo->vertexBuffer);
+  C3DTextureInfo targetInfo = targetStorage->info;
+  uint8_t* pixels = (uint8_t*)targetStorage->data;
+  const uint8_t* indexData = indexStorage->deviceData;
+  const C3DVertex* vertexData = (const C3DVertex*)vertexStorage->deviceData;
   size_t firstIndex = drawInfo->indexOffset / c3dGetIndexStride(drawInfo->indexSize);
   size_t primitiveCount = c3dGetPrimitiveCount(drawInfo);
   *primitiveOrderCount = (uint32_t)primitiveCount;
@@ -1124,22 +1204,22 @@ static bool c3dExecuteDraw(C3DCommandBuffer* commandBuffer, C3DTexture* target, 
       return true;
     }
 
-    if (!c3dTryResizeDeviceBuffer(&commandBuffer->linePrimitives, &commandBuffer->linePrimitiveCap, primitiveCount * sizeof(C3DLinePrimitive), "cudaMalloc failed while allocating line primitive buffer"))
+    if (!c3dTryResizeDeviceBuffer(&scratch->linePrimitives, &scratch->linePrimitiveCap, primitiveCount * sizeof(C3DLinePrimitive), "cudaMalloc failed while allocating line primitive buffer"))
     {
       TracyCZoneEnd(zone);
       return false;
     }
 
-    C3DLinePrimitive* primitives = (C3DLinePrimitive*)commandBuffer->linePrimitives;
+    C3DLinePrimitive* primitives = (C3DLinePrimitive*)scratch->linePrimitives;
     const int setupThreads = 128;
     const int setupBlocks = (int)((primitiveCount + (size_t)setupThreads - 1) / (size_t)setupThreads);
-    c3dSetupLinePrimitivesKernel<<<setupBlocks, setupThreads>>>(primitives, targetInfo, renderPass->viewport, indexData, drawInfo->indexSize, firstIndex, drawInfo->indexBase, vertexData, drawInfo->vertexOffset, primitiveCount, primitiveOrderBase);
+    c3dSetupLinePrimitivesKernel<<<setupBlocks, setupThreads, 0, stream>>>(primitives, targetInfo, renderPass->viewport, indexData, drawInfo->indexSize, firstIndex, drawInfo->indexBase, vertexData, drawInfo->vertexOffset, primitiveCount, primitiveOrderBase);
     bool success = c3dCheckCUDA(cudaPeekAtLastError(), "line setup kernel launch failed");
     if (success)
     {
-      success = c3dBuildTileBins(commandBuffer, targetInfo, renderPass->viewport, primitiveCount, false, primitives, &tileBaseX, &tileBaseY, &tilesX, &tilesY);
+      success = c3dBuildTileBins(scratch, stream, targetInfo, renderPass->viewport, primitiveCount, false, primitives, &tileBaseX, &tileBaseY, &tilesX, &tilesY);
     }
-    if (success && commandBuffer->tileCountsHost[0] == 0)
+    if (success && scratch->tileCountsHost[0] == 0)
     {
       TracyCZoneEnd(zone);
       return true;
@@ -1147,7 +1227,7 @@ static bool c3dExecuteDraw(C3DCommandBuffer* commandBuffer, C3DTexture* target, 
     if (success)
     {
       dim3 rasterBlocks((unsigned int)tilesX, (unsigned int)tilesY);
-      c3dRasterizeLinesKernel<<<rasterBlocks, rasterThreads>>>(targetInfo, pixels, depthBuffer, renderPass->targetBlend, textureViews, renderPass->textureBindCount, primitives, tileBaseX, tileBaseY, tilesX, commandBuffer->tileOffsetsDevice, commandBuffer->tileIndicesDevice);
+      c3dRasterizeLinesKernel<<<rasterBlocks, rasterThreads, 0, stream>>>(targetInfo, pixels, depthBuffer, renderPass->targetBlend, textureViews, renderPass->textureBindCount, primitives, tileBaseX, tileBaseY, tilesX, scratch->tileOffsetsDevice, scratch->tileIndicesDevice);
       success = c3dCheckCUDA(cudaPeekAtLastError(), "line raster kernel launch failed");
     }
 
@@ -1175,22 +1255,22 @@ static bool c3dExecuteDraw(C3DCommandBuffer* commandBuffer, C3DTexture* target, 
     return true;
   }
 
-  if (!c3dTryResizeDeviceBuffer(&commandBuffer->trianglePrimitives, &commandBuffer->trianglePrimitiveCap, primitiveCount * sizeof(C3DTrianglePrimitive), "cudaMalloc failed while allocating triangle primitive buffer"))
+  if (!c3dTryResizeDeviceBuffer(&scratch->trianglePrimitives, &scratch->trianglePrimitiveCap, primitiveCount * sizeof(C3DTrianglePrimitive), "cudaMalloc failed while allocating triangle primitive buffer"))
   {
     TracyCZoneEnd(zone);
     return false;
   }
 
-  C3DTrianglePrimitive* primitives = (C3DTrianglePrimitive*)commandBuffer->trianglePrimitives;
+  C3DTrianglePrimitive* primitives = (C3DTrianglePrimitive*)scratch->trianglePrimitives;
   const int setupThreads = 128;
   const int setupBlocks = (int)((primitiveCount + (size_t)setupThreads - 1) / (size_t)setupThreads);
-  c3dSetupTrianglePrimitivesKernel<<<setupBlocks, setupThreads>>>(primitives, targetInfo, renderPass->viewport, drawInfo->topology, indexData, drawInfo->indexSize, firstIndex, drawInfo->indexBase, vertexData, drawInfo->vertexOffset, primitiveCount, primitiveOrderBase);
+  c3dSetupTrianglePrimitivesKernel<<<setupBlocks, setupThreads, 0, stream>>>(primitives, targetInfo, renderPass->viewport, drawInfo->topology, indexData, drawInfo->indexSize, firstIndex, drawInfo->indexBase, vertexData, drawInfo->vertexOffset, primitiveCount, primitiveOrderBase);
   bool success = c3dCheckCUDA(cudaPeekAtLastError(), "triangle setup kernel launch failed");
   if (success)
   {
-    success = c3dBuildTileBins(commandBuffer, targetInfo, renderPass->viewport, primitiveCount, true, primitives, &tileBaseX, &tileBaseY, &tilesX, &tilesY);
+    success = c3dBuildTileBins(scratch, stream, targetInfo, renderPass->viewport, primitiveCount, true, primitives, &tileBaseX, &tileBaseY, &tilesX, &tilesY);
   }
-  if (success && commandBuffer->tileCountsHost[0] == 0)
+  if (success && scratch->tileCountsHost[0] == 0)
   {
     TracyCZoneEnd(zone);
     return true;
@@ -1198,7 +1278,7 @@ static bool c3dExecuteDraw(C3DCommandBuffer* commandBuffer, C3DTexture* target, 
   if (success)
   {
     dim3 rasterBlocks((unsigned int)tilesX, (unsigned int)tilesY);
-    c3dRasterizeTrianglesKernel<<<rasterBlocks, rasterThreads>>>(targetInfo, pixels, depthBuffer, renderPass->targetBlend, textureViews, renderPass->textureBindCount, primitives, tileBaseX, tileBaseY, tilesX, commandBuffer->tileOffsetsDevice, commandBuffer->tileIndicesDevice);
+    c3dRasterizeTrianglesKernel<<<rasterBlocks, rasterThreads, 0, stream>>>(targetInfo, pixels, depthBuffer, renderPass->targetBlend, textureViews, renderPass->textureBindCount, primitives, tileBaseX, tileBaseY, tilesX, scratch->tileOffsetsDevice, scratch->tileIndicesDevice);
     success = c3dCheckCUDA(cudaPeekAtLastError(), "triangle raster kernel launch failed");
   }
 
@@ -1230,26 +1310,71 @@ C3D_API bool c3dSubmitCommandBuffer(C3DCommandBuffer* commandBuffer)
     return false;
   }
 
-  C3DTexture* target = commandBuffer->renderPass.target;
-  uint64_t* depthBuffer = nullptr;
-  C3DTextureView* textureViews = nullptr;
-  bool success = true;
+  C3DTextureStorage* targetStorage = nullptr;
+  {
+    TracyCZoneN(resolve_target_zone, "c3dSubmit.resolveTargetStorage", 1);
+    if (!c3dEnsureTextureStorageForWrite(commandBuffer->renderPass.target, commandBuffer->renderPass.cycleTarget, &targetStorage))
+    {
+      TracyCZoneEnd(resolve_target_zone);
+      TracyCZoneEnd(zone);
+      return false;
+    }
+    TracyCZoneEnd(resolve_target_zone);
+  }
+
+  C3DTextureStorage* depthStorage = nullptr;
   if (commandBuffer->renderPass.depthTarget)
   {
-    depthBuffer = (uint64_t*)commandBuffer->renderPass.depthTarget->data;
+    TracyCZoneN(resolve_depth_zone, "c3dSubmit.resolveDepthStorage", 1);
+    if (!c3dEnsureTextureStorageForWrite(commandBuffer->renderPass.depthTarget, commandBuffer->renderPass.cycleDepthTarget, &depthStorage))
+    {
+      TracyCZoneEnd(resolve_depth_zone);
+      TracyCZoneEnd(zone);
+      return false;
+    }
+    TracyCZoneEnd(resolve_depth_zone);
   }
 
+  C3DSubmissionContext* context = (C3DSubmissionContext*)calloc(1, sizeof(C3DSubmissionContext));
+  if (!context)
+  {
+    c3dThrowError(C3D_ERROR_OUT_OF_MEMORY, "failed to allocate submission context");
+    TracyCZoneEnd(zone);
+    return false;
+  }
+
+  TracyCZoneN(stream_zone, "c3dSubmit.createStream", 1);
+  bool success = c3dCheckCUDA(cudaStreamCreateWithFlags(&context->stream, cudaStreamNonBlocking), "cudaStreamCreateWithFlags failed while creating submission stream");
+  TracyCZoneEnd(stream_zone);
+  C3DTextureView* textureViews = nullptr;
+  uint64_t* depthBuffer = depthStorage ? (uint64_t*)depthStorage->data : nullptr;
   if (success)
   {
-    success = c3dBuildTextureViews(commandBuffer, &commandBuffer->renderPass, &textureViews);
+    TracyCZoneN(texture_views_zone, "c3dSubmit.buildTextureViews", 1);
+    success = c3dBuildTextureViews(&context->scratch, context->stream, &commandBuffer->renderPass, &textureViews);
+    TracyCZoneEnd(texture_views_zone);
   }
 
-  if (success && depthBuffer)
+  if (success && commandBuffer->renderPass.targetLoadOp == C3D_LOAD_OP_CLEAR)
   {
+    TracyCZoneN(clear_target_zone, "c3dSubmit.clearTarget", 1);
     dim3 clearThreads(C3D_TILE_SIZE, C3D_TILE_SIZE);
-    dim3 clearBlocks((unsigned int)((target->info.width + (size_t)clearThreads.x - 1) / (size_t)clearThreads.x), (unsigned int)((target->info.height + (size_t)clearThreads.y - 1) / (size_t)clearThreads.y));
-    c3dClearDepthBufferKernel<<<clearBlocks, clearThreads>>>(depthBuffer, target->info.width, target->info.height);
+    dim3 clearBlocks((unsigned int)((targetStorage->info.width + (size_t)clearThreads.x - 1) / (size_t)clearThreads.x), (unsigned int)((targetStorage->info.height + (size_t)clearThreads.y - 1) / (size_t)clearThreads.y));
+    uint32_t clearValue = 0;
+    memcpy(&clearValue, commandBuffer->renderPass.targetClearColor, sizeof(clearValue));
+    c3dClearColorTargetKernel<<<clearBlocks, clearThreads, 0, context->stream>>>(targetStorage->info, targetStorage->data, clearValue);
+    success = c3dCheckCUDA(cudaPeekAtLastError(), "color clear kernel launch failed");
+    TracyCZoneEnd(clear_target_zone);
+  }
+
+  if (success && depthBuffer && commandBuffer->renderPass.depthLoadOp == C3D_LOAD_OP_CLEAR)
+  {
+    TracyCZoneN(clear_depth_zone, "c3dSubmit.clearDepth", 1);
+    dim3 clearThreads(C3D_TILE_SIZE, C3D_TILE_SIZE);
+    dim3 clearBlocks((unsigned int)((targetStorage->info.width + (size_t)clearThreads.x - 1) / (size_t)clearThreads.x), (unsigned int)((targetStorage->info.height + (size_t)clearThreads.y - 1) / (size_t)clearThreads.y));
+    c3dClearDepthBufferKernel<<<clearBlocks, clearThreads, 0, context->stream>>>(depthBuffer, targetStorage->info.width, targetStorage->info.height);
     success = c3dCheckCUDA(cudaPeekAtLastError(), "depth clear kernel launch failed");
+    TracyCZoneEnd(clear_depth_zone);
   }
 
   uint32_t primitiveOrderBase = 0;
@@ -1258,7 +1383,7 @@ C3D_API bool c3dSubmitCommandBuffer(C3DCommandBuffer* commandBuffer)
     for (size_t i = 0; i < commandBuffer->drawCount; ++i)
     {
       uint32_t primitiveOrderCount = 0;
-      if (!c3dExecuteDraw(commandBuffer, target, &commandBuffer->renderPass, textureViews, &commandBuffer->draws[i].info, depthBuffer, primitiveOrderBase, &primitiveOrderCount))
+      if (!c3dExecuteDraw(&context->scratch, context->stream, targetStorage, &commandBuffer->renderPass, textureViews, &commandBuffer->draws[i].info, depthBuffer, primitiveOrderBase, &primitiveOrderCount))
       {
         success = false;
         break;
@@ -1268,18 +1393,60 @@ C3D_API bool c3dSubmitCommandBuffer(C3DCommandBuffer* commandBuffer)
     }
   }
 
-  if (success)
-  {
-    success = c3dCheckCUDA(cudaDeviceSynchronize(), "render kernel execution failed");
-  }
-
   if (!success)
   {
+    TracyCZoneN(fail_cleanup_zone, "c3dSubmit.failCleanup", 1);
+    if (context->stream)
+    {
+      cudaStreamSynchronize(context->stream);
+    }
+
+    c3dDestroySubmissionContext(context);
+    TracyCZoneEnd(fail_cleanup_zone);
     TracyCZoneEnd(zone);
     return false;
   }
 
-  c3dResetCommandBuffer(commandBuffer);
+  uint64_t submissionSerial = 0;
+  {
+    TracyCZoneN(register_zone, "c3dSubmit.registerSubmission", 1);
+    if (!c3dRegisterSubmission(&submissionSerial, context->stream, c3dDestroySubmissionContext, context))
+    {
+      cudaStreamSynchronize(context->stream);
+      c3dDestroySubmissionContext(context);
+      TracyCZoneEnd(register_zone);
+      TracyCZoneEnd(zone);
+      return false;
+    }
+    TracyCZoneEnd(register_zone);
+  }
+
+  {
+    TracyCZoneN(bind_zone, "c3dSubmit.bindResources", 1);
+    c3dBindTextureStorage(targetStorage, submissionSerial);
+    if (depthStorage)
+    {
+      c3dBindTextureStorage(depthStorage, submissionSerial);
+    }
+
+    for (size_t i = 0; i < commandBuffer->renderPass.textureBindCount; ++i)
+    {
+      c3dBindTextureStorage(c3dGetCurrentTextureStorage(commandBuffer->renderPass.textureBindings[i].texture), submissionSerial);
+    }
+
+    for (size_t i = 0; i < commandBuffer->drawCount; ++i)
+    {
+      c3dBindBufferStorage(c3dGetCurrentBufferStorage(commandBuffer->draws[i].info.indexBuffer), submissionSerial);
+      c3dBindBufferStorage(c3dGetCurrentBufferStorage(commandBuffer->draws[i].info.vertexBuffer), submissionSerial);
+    }
+    TracyCZoneEnd(bind_zone);
+  }
+
+  {
+    TracyCZoneN(reset_zone, "c3dSubmit.resetCommandBuffer", 1);
+    c3dResetCommandBuffer(commandBuffer);
+    TracyCZoneEnd(reset_zone);
+  }
   TracyCZoneEnd(zone);
   return true;
 }

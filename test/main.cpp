@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <tracy/TracyC.h>
 #include <windows.h>
+#include <atomic>
 
 typedef struct
 {
@@ -26,10 +27,6 @@ typedef struct
 {
   HWND window;
   HDC window_dc;
-  HDC bitmap_dc;
-  HBITMAP dib_bitmap;
-  HGDIOBJ old_bitmap;
-  void* dib_pixels;
   size_t width;
   size_t height;
   struct
@@ -42,6 +39,7 @@ typedef struct
 static RenderState g_render_state = {0};
 static PresentState g_present_state = {0};
 static bool g_error_dialog_shown = false;
+static std::atomic<uint64_t> g_presented_frame_count(0);
 
 static void c3dErrorCallback(C3DErrorID id, const char* desc, C3DErrorLoc loc)
 {
@@ -69,7 +67,7 @@ static void clearFallback(C3DTexture* texture, uint8_t r, uint8_t g, uint8_t b)
 {
   TracyCZoneN(tracy_zone, "clearFallback", 1);
   uint8_t clear_color[4] = {r, g, b, 255};
-  c3dClearTexture(texture, clear_color);
+  c3dClearTexture(texture, clear_color, false);
   TracyCZoneEnd(tracy_zone);
 }
 
@@ -188,24 +186,6 @@ static void destroyRenderState(void)
 static void destroyPresentState(void)
 {
   TracyCZoneN(tracy_zone, "destroyPresentState", 1);
-  if (g_present_state.bitmap_dc && g_present_state.old_bitmap)
-  {
-    SelectObject(g_present_state.bitmap_dc, g_present_state.old_bitmap);
-    g_present_state.old_bitmap = NULL;
-  }
-
-  if (g_present_state.dib_bitmap)
-  {
-    DeleteObject(g_present_state.dib_bitmap);
-    g_present_state.dib_bitmap = NULL;
-  }
-
-  if (g_present_state.bitmap_dc)
-  {
-    DeleteDC(g_present_state.bitmap_dc);
-    g_present_state.bitmap_dc = NULL;
-  }
-
   if (g_present_state.window_dc)
   {
     ReleaseDC(g_present_state.window, g_present_state.window_dc);
@@ -213,7 +193,6 @@ static void destroyPresentState(void)
   }
 
   g_present_state.window = NULL;
-  g_present_state.dib_pixels = NULL;
   g_present_state.width = 0;
   g_present_state.height = 0;
   ZeroMemory(&g_present_state.bitmap_info, sizeof(g_present_state.bitmap_info));
@@ -239,16 +218,6 @@ static bool ensurePresentState(HWND window, size_t width, size_t height)
     }
   }
 
-  if (!g_present_state.bitmap_dc)
-  {
-    g_present_state.bitmap_dc = CreateCompatibleDC(g_present_state.window_dc);
-    if (!g_present_state.bitmap_dc)
-    {
-      TracyCZoneEnd(tracy_zone);
-      return false;
-    }
-  }
-
   if (g_present_state.width != width || g_present_state.height != height)
   {
     g_present_state.width = width;
@@ -264,49 +233,6 @@ static bool ensurePresentState(HWND window, size_t width, size_t height)
     g_present_state.bitmap_info.masks[1] = 0x0000FF00u;
     g_present_state.bitmap_info.masks[2] = 0x00FF0000u;
     g_present_state.bitmap_info.masks[3] = 0xFF000000u;
-
-    if (g_present_state.bitmap_dc && g_present_state.old_bitmap)
-    {
-      SelectObject(g_present_state.bitmap_dc, g_present_state.old_bitmap);
-      g_present_state.old_bitmap = NULL;
-    }
-
-    if (g_present_state.dib_bitmap)
-    {
-      DeleteObject(g_present_state.dib_bitmap);
-      g_present_state.dib_bitmap = NULL;
-      g_present_state.dib_pixels = NULL;
-    }
-
-    g_present_state.dib_bitmap = CreateDIBSection(
-        g_present_state.bitmap_dc,
-        (BITMAPINFO*)&g_present_state.bitmap_info,
-        DIB_RGB_COLORS,
-        &g_present_state.dib_pixels,
-        NULL,
-        0);
-    if (!g_present_state.dib_bitmap || !g_present_state.dib_pixels)
-    {
-      if (g_present_state.dib_bitmap)
-      {
-        DeleteObject(g_present_state.dib_bitmap);
-        g_present_state.dib_bitmap = NULL;
-      }
-
-      g_present_state.dib_pixels = NULL;
-      TracyCZoneEnd(tracy_zone);
-      return false;
-    }
-
-    g_present_state.old_bitmap = SelectObject(g_present_state.bitmap_dc, g_present_state.dib_bitmap);
-    if (!g_present_state.old_bitmap)
-    {
-      DeleteObject(g_present_state.dib_bitmap);
-      g_present_state.dib_bitmap = NULL;
-      g_present_state.dib_pixels = NULL;
-      TracyCZoneEnd(tracy_zone);
-      return false;
-    }
   }
 
   TracyCZoneEnd(tracy_zone);
@@ -323,18 +249,28 @@ static bool presentFrameCallback(void* user_data, const C3DPresentFrame* frame)
     return false;
   }
 
-  size_t size = frame->rowPitch * frame->height;
-  memcpy(g_present_state.dib_pixels, frame->pixels, size);
-  BitBlt(
+  TracyCZoneN(blit_zone, "presentFrameCallback.blit", 1);
+  int copied = SetDIBitsToDevice(
       g_present_state.window_dc,
       0,
       0,
       (int)frame->width,
       (int)frame->height,
-      g_present_state.bitmap_dc,
       0,
       0,
-      SRCCOPY);
+      0,
+      (UINT)frame->height,
+      frame->pixels,
+      (BITMAPINFO*)&g_present_state.bitmap_info,
+      DIB_RGB_COLORS);
+  TracyCZoneEnd(blit_zone);
+  if (copied == GDI_ERROR)
+  {
+    TracyCZoneEnd(tracy_zone);
+    return false;
+  }
+
+  g_presented_frame_count.fetch_add(1, std::memory_order_relaxed);
   TracyCZoneEnd(tracy_zone);
   return true;
 }
@@ -377,7 +313,7 @@ static bool createCheckerTexture(void)
     return false;
   }
 
-  bool success = c3dWriteStageBuffer(stage_buffer, 0, sizeof(pixels), pixels) && c3dWriteTexture(g_render_state.texture, 0, sizeof(pixels), stage_buffer, 0);
+  bool success = c3dWriteStageBuffer(stage_buffer, 0, sizeof(pixels), pixels, false) && c3dWriteTexture(g_render_state.texture, 0, sizeof(pixels), stage_buffer, 0, false);
   c3dDeleteStageBuffer(stage_buffer);
   TracyCZoneEnd(tracy_zone);
   return success;
@@ -405,7 +341,7 @@ static bool createQuadBuffers(void)
     return false;
   }
 
-  bool success = c3dWriteStageBuffer(stage_buffer, 0, sizeof(quad_indices), quad_indices) && c3dWriteBuffer(g_render_state.quad_indices, 0, sizeof(quad_indices), stage_buffer, 0);
+  bool success = c3dWriteStageBuffer(stage_buffer, 0, sizeof(quad_indices), quad_indices, false) && c3dWriteBuffer(g_render_state.quad_indices, 0, sizeof(quad_indices), stage_buffer, 0, false);
   c3dDeleteStageBuffer(stage_buffer);
   if (!success)
   {
@@ -443,7 +379,7 @@ static bool createLineBuffers(void)
     return false;
   }
 
-  bool success = c3dWriteStageBuffer(stage_buffer, 0, sizeof(line_indices), line_indices) && c3dWriteBuffer(g_render_state.line_indices, 0, sizeof(line_indices), stage_buffer, 0);
+  bool success = c3dWriteStageBuffer(stage_buffer, 0, sizeof(line_indices), line_indices, false) && c3dWriteBuffer(g_render_state.line_indices, 0, sizeof(line_indices), stage_buffer, 0, false);
   c3dDeleteStageBuffer(stage_buffer);
   if (!success)
   {
@@ -556,21 +492,6 @@ static void render(C3DTexture* texture)
     TracyCZoneEnd(depth_zone);
   }
 
-  uint8_t clear_color[4] = {18, 22, 30, 255};
-  {
-    TracyCZoneN(clear_zone, "render.clearTarget", 1);
-    if (!c3dClearTexture(texture, clear_color))
-    {
-      TracyCZoneN(fallback_zone, "render.fallback.clear", 1);
-      clearFallback(texture, 255, 0, 255);
-      TracyCZoneEnd(fallback_zone);
-      TracyCZoneEnd(clear_zone);
-      TracyCZoneEnd(tracy_zone);
-      return;
-    }
-    TracyCZoneEnd(clear_zone);
-  }
-
   float t = getSeconds();
   float scale_x = 0.0f;
   float scale_y = 0.0f;
@@ -631,7 +552,7 @@ static void render(C3DTexture* texture)
   void* quad_stage_data = NULL;
   {
     TracyCZoneN(quad_map_zone, "render.mapQuadStage", 1);
-    quad_stage_data = c3dMapStageBuffer(g_render_state.quad_upload_stage, C3D_MEMORY_ACCESS_WRITE);
+    quad_stage_data = c3dMapStageBuffer(g_render_state.quad_upload_stage, C3D_MEMORY_ACCESS_WRITE, true);
     if (!quad_stage_data)
     {
       TracyCZoneN(fallback_zone, "render.fallback.mapQuadStage", 1);
@@ -656,7 +577,7 @@ static void render(C3DTexture* texture)
 
   {
     TracyCZoneN(quad_upload_zone, "render.uploadQuadVertices", 1);
-    if (!c3dWriteBuffer(g_render_state.quad_vertices, 0, sizeof(quad_vertices), g_render_state.quad_upload_stage, 0))
+    if (!c3dWriteBuffer(g_render_state.quad_vertices, 0, sizeof(quad_vertices), g_render_state.quad_upload_stage, 0, true))
     {
       TracyCZoneN(fallback_zone, "render.fallback.uploadQuad", 1);
       clearFallback(texture, 255, 32, 32);
@@ -698,7 +619,7 @@ static void render(C3DTexture* texture)
   void* line_stage_data = NULL;
   {
     TracyCZoneN(line_map_zone, "render.mapLineStage", 1);
-    line_stage_data = c3dMapStageBuffer(g_render_state.line_upload_stage, C3D_MEMORY_ACCESS_WRITE);
+    line_stage_data = c3dMapStageBuffer(g_render_state.line_upload_stage, C3D_MEMORY_ACCESS_WRITE, true);
     if (!line_stage_data)
     {
       TracyCZoneN(fallback_zone, "render.fallback.mapLineStage", 1);
@@ -723,7 +644,7 @@ static void render(C3DTexture* texture)
 
   {
     TracyCZoneN(line_upload_zone, "render.uploadLineVertices", 1);
-    if (!c3dWriteBuffer(g_render_state.line_vertices, 0, sizeof(line_vertices), g_render_state.line_upload_stage, 0))
+    if (!c3dWriteBuffer(g_render_state.line_vertices, 0, sizeof(line_vertices), g_render_state.line_upload_stage, 0, true))
     {
       TracyCZoneN(fallback_zone, "render.fallback.uploadLine", 1);
       clearFallback(texture, 255, 32, 32);
@@ -747,7 +668,15 @@ static void render(C3DTexture* texture)
   {
     TracyCZoneN(pass_info_zone, "render.buildRenderPassInfo", 1);
     render_pass.target = texture;
+    render_pass.cycleTarget = true;
+    render_pass.targetLoadOp = C3D_LOAD_OP_CLEAR;
+    render_pass.targetClearColor[0] = 18;
+    render_pass.targetClearColor[1] = 22;
+    render_pass.targetClearColor[2] = 30;
+    render_pass.targetClearColor[3] = 255;
     render_pass.depthTarget = g_render_state.depth_texture;
+    render_pass.cycleDepthTarget = true;
+    render_pass.depthLoadOp = C3D_LOAD_OP_CLEAR;
     render_pass.viewport.x = 0;
     render_pass.viewport.y = 0;
     render_pass.viewport.width = target_info.width;
@@ -934,12 +863,11 @@ static void updateWindowTitle(HWND window, LARGE_INTEGER now, LARGE_INTEGER freq
 {
   TracyCZoneN(tracy_zone, "updateWindowTitle", 1);
   static LARGE_INTEGER last_title_update = {0};
-  static uint32_t frame_count = 0;
-
-  ++frame_count;
+  static uint64_t last_presented_frame_count = 0;
   if (!last_title_update.QuadPart)
   {
     last_title_update = now;
+    last_presented_frame_count = g_presented_frame_count.load(std::memory_order_relaxed);
     TracyCZoneEnd(tracy_zone);
     return;
   }
@@ -952,13 +880,15 @@ static void updateWindowTitle(HWND window, LARGE_INTEGER now, LARGE_INTEGER freq
   }
 
   char title[64];
-  double fps = (double)frame_count / elapsed_seconds;
+  uint64_t presented_frame_count = g_presented_frame_count.load(std::memory_order_relaxed);
+  uint64_t presented_delta = presented_frame_count - last_presented_frame_count;
+  double fps = (double)presented_delta / elapsed_seconds;
   TracyCPlotI("C3D FPS", (int64_t)(fps * 100.0));
   snprintf(title, sizeof(title), "C3D Test - %.1f FPS", fps);
   SetWindowTextA(window, title);
 
-  frame_count = 0;
   last_title_update = now;
+  last_presented_frame_count = presented_frame_count;
   TracyCZoneEnd(tracy_zone);
 }
 
@@ -1034,10 +964,29 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR comman
     }
 
     C3DTexture* backbuffer = NULL;
-    if (c3dAcquireNextTexture(swapchain, &backbuffer))
+    bool acquired = false;
     {
-      render(backbuffer);
-      if (!c3dPresentSwapchain(swapchain))
+      TracyCZoneN(acquire_zone, "acquireBackbuffer", 1);
+      acquired = c3dAcquireNextTexture(swapchain, &backbuffer);
+      TracyCZoneEnd(acquire_zone);
+    }
+
+    if (acquired)
+    {
+      {
+        TracyCZoneN(render_zone, "renderBackbuffer", 1);
+        render(backbuffer);
+        TracyCZoneEnd(render_zone);
+      }
+
+      bool presented = false;
+      {
+        TracyCZoneN(present_zone, "presentBackbuffer", 1);
+        presented = c3dPresentSwapchain(swapchain);
+        TracyCZoneEnd(present_zone);
+      }
+
+      if (!presented)
       {
         TracyCZoneEnd(frame_zone);
         break;

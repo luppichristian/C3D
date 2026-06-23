@@ -98,8 +98,8 @@ C3D_API bool c3dDeleteStageBuffer(C3DStageBuffer* stageBuffer);
 C3D_API bool c3dResizeStageBuffer(C3DStageBuffer* stageBuffer, size_t size);
 C3D_API bool c3dGetStageBufferInfo(C3DStageBuffer* stageBuffer, C3DStageBufferInfo* info);
 C3D_API bool c3dReadStageBuffer(C3DStageBuffer* stageBuffer, size_t offset, size_t size, void* buffer);
-C3D_API bool c3dWriteStageBuffer(C3DStageBuffer* stageBuffer, size_t offset, size_t size, const void* buffer);
-C3D_API void* c3dMapStageBuffer(C3DStageBuffer* stageBuffer, C3DMemoryAccess access);
+C3D_API bool c3dWriteStageBuffer(C3DStageBuffer* stageBuffer, size_t offset, size_t size, const void* buffer, bool cycle);
+C3D_API void* c3dMapStageBuffer(C3DStageBuffer* stageBuffer, C3DMemoryAccess access, bool cycle);
 C3D_API bool c3dUnmapStageBuffer(C3DStageBuffer* stageBuffer);
 
 //
@@ -126,9 +126,9 @@ typedef struct C3DTexture C3DTexture;
 C3D_API C3DTexture* c3dCreateTexture(const C3DTextureInfo* info);
 C3D_API bool c3dDeleteTexture(C3DTexture* texture);
 C3D_API bool c3dReadTexture(C3DTexture* texture, size_t textureOffset, size_t size, C3DStageBuffer* stageBuffer, size_t stageOffset);
-C3D_API bool c3dWriteTexture(C3DTexture* texture, size_t textureOffset, size_t size, C3DStageBuffer* stageBuffer, size_t stageOffset);
-C3D_API bool c3dFillTexture(C3DTexture* texture, size_t offset, size_t size, void* texel);
-C3D_API bool c3dClearTexture(C3DTexture* texture, void* texel);
+C3D_API bool c3dWriteTexture(C3DTexture* texture, size_t textureOffset, size_t size, C3DStageBuffer* stageBuffer, size_t stageOffset, bool cycle);
+C3D_API bool c3dFillTexture(C3DTexture* texture, size_t offset, size_t size, void* texel, bool cycle);
+C3D_API bool c3dClearTexture(C3DTexture* texture, void* texel, bool cycle);
 C3D_API bool c3dGetTextureInfo(C3DTexture* texture, C3DTextureInfo* info);
 C3D_API bool c3dResizeTexture(C3DTexture* texture, size_t width, size_t height, size_t depth);
 
@@ -201,8 +201,8 @@ C3D_API bool c3dDeleteBuffer(C3DBuffer* buffer);
 C3D_API bool c3dResizeBuffer(C3DBuffer* buffer, size_t size);
 C3D_API bool c3dGetBufferInfo(C3DBuffer* buffer, C3DBufferInfo* info);
 C3D_API bool c3dReadBuffer(C3DBuffer* buffer, size_t bufferOffset, size_t size, C3DStageBuffer* stageBuffer, size_t stageOffset);
-C3D_API bool c3dWriteBuffer(C3DBuffer* buffer, size_t bufferOffset, size_t size, C3DStageBuffer* stageBuffer, size_t stageOffset);
-C3D_API bool c3dBufferCopy(C3DBuffer* destination, size_t destinationOffset, C3DBuffer* source, size_t sourceOffset, size_t size);
+C3D_API bool c3dWriteBuffer(C3DBuffer* buffer, size_t bufferOffset, size_t size, C3DStageBuffer* stageBuffer, size_t stageOffset, bool cycle);
+C3D_API bool c3dBufferCopy(C3DBuffer* destination, size_t destinationOffset, C3DBuffer* source, size_t sourceOffset, size_t size, bool cycle);
 
 //
 // Vertex layout
@@ -242,6 +242,12 @@ typedef enum
   C3D_BLEND_MODE_ADDITIVE,
 } C3DBlendMode;
 
+typedef enum
+{
+  C3D_LOAD_OP_LOAD,
+  C3D_LOAD_OP_CLEAR,
+} C3DLoadOp;
+
 typedef struct
 {
   C3DSampler sampler;
@@ -271,7 +277,12 @@ typedef struct
 typedef struct
 {
   C3DTexture* target;
+  bool cycleTarget;
+  C3DLoadOp targetLoadOp;
+  uint8_t targetClearColor[4];
   C3DTexture* depthTarget;
+  bool cycleDepthTarget;
+  C3DLoadOp depthLoadOp;
   C3DViewport viewport;
   C3DBlendMode targetBlend;
   C3DTextureBinding* textureBindings;

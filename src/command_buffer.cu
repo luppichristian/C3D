@@ -63,37 +63,6 @@ void c3dResetCommandBuffer(C3DCommandBuffer* commandBuffer)
   c3dResetRenderPassInfo(&commandBuffer->renderPass);
 }
 
-static void c3dReleaseCommandBufferScratch(C3DCommandBuffer* commandBuffer)
-{
-  cudaFree(commandBuffer->depthBuffer);
-  cudaFree(commandBuffer->linePrimitives);
-  cudaFree(commandBuffer->trianglePrimitives);
-  cudaFree(commandBuffer->textureViews);
-  cudaFree(commandBuffer->tileCountsDevice);
-  cudaFree(commandBuffer->tileOffsetsDevice);
-  cudaFree(commandBuffer->tileIndicesDevice);
-  free(commandBuffer->tileCountsHost);
-  free(commandBuffer->tileOffsetsHost);
-  commandBuffer->depthBuffer = nullptr;
-  commandBuffer->depthCap = 0;
-  commandBuffer->linePrimitives = nullptr;
-  commandBuffer->linePrimitiveCap = 0;
-  commandBuffer->trianglePrimitives = nullptr;
-  commandBuffer->trianglePrimitiveCap = 0;
-  commandBuffer->textureViews = nullptr;
-  commandBuffer->textureViewCap = 0;
-  commandBuffer->tileCountsDevice = nullptr;
-  commandBuffer->tileOffsetsDevice = nullptr;
-  commandBuffer->tileIndicesDevice = nullptr;
-  commandBuffer->tileCountsHost = nullptr;
-  commandBuffer->tileOffsetsHost = nullptr;
-  commandBuffer->tileCountCap = 0;
-  commandBuffer->tileOffsetCap = 0;
-  commandBuffer->tileIndexCap = 0;
-  commandBuffer->tileCountsHostCap = 0;
-  commandBuffer->tileOffsetsHostCap = 0;
-}
-
 static bool c3dIsValidSampler(C3DSampler sampler)
 {
   return sampler >= C3D_SAMPLER_POINT_CLAMP && sampler <= C3D_SAMPLER_LINEAR_WRAP;
@@ -107,6 +76,11 @@ static bool c3dIsValidTopology(C3DTopology topology)
 static bool c3dIsValidBlendMode(C3DBlendMode blendMode)
 {
   return blendMode >= C3D_BLEND_MODE_NONE && blendMode <= C3D_BLEND_MODE_ADDITIVE;
+}
+
+static bool c3dIsValidLoadOp(C3DLoadOp loadOp)
+{
+  return loadOp >= C3D_LOAD_OP_LOAD && loadOp <= C3D_LOAD_OP_CLEAR;
 }
 
 static bool c3dIsColorTextureFormat(C3DTextureFormat format)
@@ -210,6 +184,24 @@ static bool c3dValidateRenderPass(const C3DRenderPassInfo* renderPass)
   if (!c3dIsValidBlendMode(renderPass->targetBlend))
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "render pass blend mode is invalid");
+    return false;
+  }
+
+  if (!c3dIsValidLoadOp(renderPass->targetLoadOp))
+  {
+    c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "render pass target load op is invalid");
+    return false;
+  }
+
+  if (!c3dIsValidLoadOp(renderPass->depthLoadOp))
+  {
+    c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "render pass depth load op is invalid");
+    return false;
+  }
+
+  if (!renderPass->depthTarget && renderPass->depthLoadOp != C3D_LOAD_OP_LOAD)
+  {
+    c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "depth load op cannot clear without a depth target");
     return false;
   }
 
@@ -340,7 +332,6 @@ C3D_API bool c3dDeleteCommandBuffer(C3DCommandBuffer* commandBuffer)
   }
 
   c3dResetRenderPassInfo(&commandBuffer->renderPass);
-  c3dReleaseCommandBufferScratch(commandBuffer);
   free(commandBuffer->draws);
   free(commandBuffer);
   TracyCZoneEnd(zone);
