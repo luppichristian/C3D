@@ -23,7 +23,51 @@ typedef struct
   C3DCommandBuffer* command_buffer;
 } RenderState;
 
+typedef struct
+{
+  HDC window_dc;
+  HDC bitmap_dc;
+  HBITMAP dib_bitmap;
+  HGDIOBJ old_bitmap;
+  void* dib_pixels;
+  size_t width;
+  size_t height;
+  struct
+  {
+    BITMAPINFOHEADER header;
+    DWORD masks[4];
+  } bitmap_info;
+} PresentState;
+
+typedef enum
+{
+  PRESENT_SLOT_FREE = 0,
+  PRESENT_SLOT_READY,
+  PRESENT_SLOT_PRESENTING,
+} PresentSlotState;
+
+typedef struct
+{
+  C3DStageBuffer* stage_buffer;
+  C3DTextureInfo info;
+  uint64_t sequence;
+  PresentSlotState state;
+} PresentSlot;
+
+typedef struct
+{
+  HWND window;
+  HANDLE thread;
+  HANDLE wake_event;
+  HANDLE shutdown_event;
+  CRITICAL_SECTION lock;
+  PresentSlot slots[3];
+  uint64_t next_sequence;
+} PresenterState;
+
 static RenderState g_render_state = {0};
+static PresentState g_present_state = {0};
+static PresenterState g_presenter_state = {0};
 static bool g_error_dialog_shown = false;
 
 static void c3dErrorCallback(C3DErrorID id, const char* desc, C3DErrorLoc loc)
@@ -171,6 +215,333 @@ static void destroyRenderState(void)
   }
 
   g_render_state.initialized = false;
+  TracyCZoneEnd(tracy_zone);
+}
+
+static void destroyPresentState(HWND window)
+{
+  TracyCZoneN(tracy_zone, "destroyPresentState", 1);
+  if (g_present_state.bitmap_dc && g_present_state.old_bitmap)
+  {
+    SelectObject(g_present_state.bitmap_dc, g_present_state.old_bitmap);
+    g_present_state.old_bitmap = NULL;
+  }
+
+  if (g_present_state.dib_bitmap)
+  {
+    DeleteObject(g_present_state.dib_bitmap);
+    g_present_state.dib_bitmap = NULL;
+  }
+
+  if (g_present_state.bitmap_dc)
+  {
+    DeleteDC(g_present_state.bitmap_dc);
+    g_present_state.bitmap_dc = NULL;
+  }
+
+  if (g_present_state.window_dc)
+  {
+    ReleaseDC(window, g_present_state.window_dc);
+    g_present_state.window_dc = NULL;
+  }
+
+  g_present_state.dib_pixels = NULL;
+  g_present_state.width = 0;
+  g_present_state.height = 0;
+  ZeroMemory(&g_present_state.bitmap_info, sizeof(g_present_state.bitmap_info));
+  TracyCZoneEnd(tracy_zone);
+}
+
+static bool ensurePresentState(HWND window, const C3DTextureInfo* info)
+{
+  TracyCZoneN(tracy_zone, "ensurePresentState", 1);
+  if (!g_present_state.window_dc)
+  {
+    g_present_state.window_dc = GetDC(window);
+    if (!g_present_state.window_dc)
+    {
+      TracyCZoneEnd(tracy_zone);
+      return false;
+    }
+  }
+
+  if (!g_present_state.bitmap_dc)
+  {
+    g_present_state.bitmap_dc = CreateCompatibleDC(g_present_state.window_dc);
+    if (!g_present_state.bitmap_dc)
+    {
+      TracyCZoneEnd(tracy_zone);
+      return false;
+    }
+  }
+
+  if (g_present_state.width != info->width || g_present_state.height != info->height)
+  {
+    g_present_state.width = info->width;
+    g_present_state.height = info->height;
+    ZeroMemory(&g_present_state.bitmap_info, sizeof(g_present_state.bitmap_info));
+    g_present_state.bitmap_info.header.biSize = sizeof(g_present_state.bitmap_info.header);
+    g_present_state.bitmap_info.header.biWidth = (LONG)info->width;
+    g_present_state.bitmap_info.header.biHeight = -(LONG)info->height;
+    g_present_state.bitmap_info.header.biPlanes = 1;
+    g_present_state.bitmap_info.header.biBitCount = 32;
+    g_present_state.bitmap_info.header.biCompression = BI_BITFIELDS;
+    g_present_state.bitmap_info.masks[0] = 0x000000FFu;
+    g_present_state.bitmap_info.masks[1] = 0x0000FF00u;
+    g_present_state.bitmap_info.masks[2] = 0x00FF0000u;
+    g_present_state.bitmap_info.masks[3] = 0xFF000000u;
+
+    if (g_present_state.bitmap_dc && g_present_state.old_bitmap)
+    {
+      SelectObject(g_present_state.bitmap_dc, g_present_state.old_bitmap);
+      g_present_state.old_bitmap = NULL;
+    }
+
+    if (g_present_state.dib_bitmap)
+    {
+      DeleteObject(g_present_state.dib_bitmap);
+      g_present_state.dib_bitmap = NULL;
+      g_present_state.dib_pixels = NULL;
+    }
+
+    g_present_state.dib_bitmap = CreateDIBSection(
+        g_present_state.bitmap_dc,
+        (BITMAPINFO*)&g_present_state.bitmap_info,
+        DIB_RGB_COLORS,
+        &g_present_state.dib_pixels,
+        NULL,
+        0);
+    if (!g_present_state.dib_bitmap || !g_present_state.dib_pixels)
+    {
+      if (g_present_state.dib_bitmap)
+      {
+        DeleteObject(g_present_state.dib_bitmap);
+        g_present_state.dib_bitmap = NULL;
+      }
+      g_present_state.dib_pixels = NULL;
+      TracyCZoneEnd(tracy_zone);
+      return false;
+    }
+
+    g_present_state.old_bitmap = SelectObject(g_present_state.bitmap_dc, g_present_state.dib_bitmap);
+    if (!g_present_state.old_bitmap)
+    {
+      DeleteObject(g_present_state.dib_bitmap);
+      g_present_state.dib_bitmap = NULL;
+      g_present_state.dib_pixels = NULL;
+      TracyCZoneEnd(tracy_zone);
+      return false;
+    }
+  }
+
+  TracyCZoneEnd(tracy_zone);
+  return true;
+}
+
+static bool presenterHasActiveSlot(void)
+{
+  bool active = false;
+  EnterCriticalSection(&g_presenter_state.lock);
+  for (size_t i = 0; i < _countof(g_presenter_state.slots); ++i)
+  {
+    PresentSlotState state = g_presenter_state.slots[i].state;
+    if (state == PRESENT_SLOT_READY || state == PRESENT_SLOT_PRESENTING)
+    {
+      active = true;
+      break;
+    }
+  }
+  LeaveCriticalSection(&g_presenter_state.lock);
+  return active;
+}
+
+static bool ensurePresenterSlots(size_t width, size_t height)
+{
+  TracyCZoneN(tracy_zone, "ensurePresenterSlots", 1);
+  while (presenterHasActiveSlot())
+  {
+    Sleep(0);
+  }
+
+  EnterCriticalSection(&g_presenter_state.lock);
+  for (size_t i = 0; i < _countof(g_presenter_state.slots); ++i)
+  {
+    g_presenter_state.slots[i].state = PRESENT_SLOT_FREE;
+    g_presenter_state.slots[i].sequence = 0;
+    g_presenter_state.slots[i].info.width = width;
+    g_presenter_state.slots[i].info.height = height;
+    g_presenter_state.slots[i].info.depth = 1;
+    g_presenter_state.slots[i].info.format = C3D_TEXTURE_FORMAT_RGBA8;
+  }
+  LeaveCriticalSection(&g_presenter_state.lock);
+
+  for (size_t i = 0; i < _countof(g_presenter_state.slots); ++i)
+  {
+    if (!ensureStageBufferSize(&g_presenter_state.slots[i].stage_buffer, width * height * 4))
+    {
+      TracyCZoneEnd(tracy_zone);
+      return false;
+    }
+  }
+
+  TracyCZoneEnd(tracy_zone);
+  return true;
+}
+
+static DWORD WINAPI presenterThreadProc(LPVOID parameter)
+{
+  TracyCZoneN(tracy_zone, "presenterThreadProc", 1);
+  HWND window = (HWND)parameter;
+  HANDLE wait_handles[2] = {g_presenter_state.shutdown_event, g_presenter_state.wake_event};
+
+  for (;;)
+  {
+    DWORD wait_result = WaitForMultipleObjects(2, wait_handles, FALSE, INFINITE);
+    if (wait_result == WAIT_OBJECT_0)
+    {
+      break;
+    }
+
+    for (;;)
+    {
+      PresentSlot* latest_slot = NULL;
+      EnterCriticalSection(&g_presenter_state.lock);
+      for (size_t i = 0; i < _countof(g_presenter_state.slots); ++i)
+      {
+        PresentSlot* slot = &g_presenter_state.slots[i];
+        if (slot->state != PRESENT_SLOT_READY)
+        {
+          continue;
+        }
+
+        if (!latest_slot || slot->sequence > latest_slot->sequence)
+        {
+          latest_slot = slot;
+        }
+      }
+
+      if (latest_slot)
+      {
+        for (size_t i = 0; i < _countof(g_presenter_state.slots); ++i)
+        {
+          PresentSlot* slot = &g_presenter_state.slots[i];
+          if (slot != latest_slot && slot->state == PRESENT_SLOT_READY)
+          {
+            slot->state = PRESENT_SLOT_FREE;
+          }
+        }
+
+        latest_slot->state = PRESENT_SLOT_PRESENTING;
+      }
+      LeaveCriticalSection(&g_presenter_state.lock);
+
+      if (!latest_slot)
+      {
+        break;
+      }
+
+      if (ensurePresentState(window, &latest_slot->info))
+      {
+        size_t size = latest_slot->info.width * latest_slot->info.height * 4;
+        void* buffer = c3dMapStageBuffer(latest_slot->stage_buffer, C3D_MEMORY_ACCESS_READ);
+        if (buffer)
+        {
+          TracyCZoneN(copy_zone, "presenterThread.copyToDibSection", 1);
+          memcpy(g_present_state.dib_pixels, buffer, size);
+          TracyCZoneEnd(copy_zone);
+
+          TracyCZoneN(blit_zone, "presenterThread.BitBlt", 1);
+          BitBlt(
+              g_present_state.window_dc,
+              0,
+              0,
+              (int)latest_slot->info.width,
+              (int)latest_slot->info.height,
+              g_present_state.bitmap_dc,
+              0,
+              0,
+              SRCCOPY);
+          TracyCZoneEnd(blit_zone);
+
+          c3dUnmapStageBuffer(latest_slot->stage_buffer);
+        }
+      }
+
+      EnterCriticalSection(&g_presenter_state.lock);
+      latest_slot->state = PRESENT_SLOT_FREE;
+      LeaveCriticalSection(&g_presenter_state.lock);
+    }
+  }
+
+  TracyCZoneEnd(tracy_zone);
+  return 0;
+}
+
+static bool initializePresenter(HWND window, size_t width, size_t height)
+{
+  TracyCZoneN(tracy_zone, "initializePresenter", 1);
+  ZeroMemory(&g_presenter_state, sizeof(g_presenter_state));
+  g_presenter_state.window = window;
+  InitializeCriticalSection(&g_presenter_state.lock);
+  g_presenter_state.wake_event = CreateEventA(NULL, FALSE, FALSE, NULL);
+  g_presenter_state.shutdown_event = CreateEventA(NULL, TRUE, FALSE, NULL);
+  if (!g_presenter_state.wake_event || !g_presenter_state.shutdown_event)
+  {
+    TracyCZoneEnd(tracy_zone);
+    return false;
+  }
+
+  if (!ensurePresenterSlots(width, height))
+  {
+    TracyCZoneEnd(tracy_zone);
+    return false;
+  }
+
+  g_presenter_state.thread = CreateThread(NULL, 0, presenterThreadProc, window, 0, NULL);
+  bool created = g_presenter_state.thread != NULL;
+  TracyCZoneEnd(tracy_zone);
+  return created;
+}
+
+static void shutdownPresenter(HWND window)
+{
+  TracyCZoneN(tracy_zone, "shutdownPresenter", 1);
+  if (g_presenter_state.shutdown_event)
+  {
+    SetEvent(g_presenter_state.shutdown_event);
+  }
+
+  if (g_presenter_state.thread)
+  {
+    WaitForSingleObject(g_presenter_state.thread, INFINITE);
+    CloseHandle(g_presenter_state.thread);
+    g_presenter_state.thread = NULL;
+  }
+
+  for (size_t i = 0; i < _countof(g_presenter_state.slots); ++i)
+  {
+    if (g_presenter_state.slots[i].stage_buffer)
+    {
+      c3dDeleteStageBuffer(g_presenter_state.slots[i].stage_buffer);
+      g_presenter_state.slots[i].stage_buffer = NULL;
+    }
+  }
+
+  if (g_presenter_state.wake_event)
+  {
+    CloseHandle(g_presenter_state.wake_event);
+    g_presenter_state.wake_event = NULL;
+  }
+
+  if (g_presenter_state.shutdown_event)
+  {
+    CloseHandle(g_presenter_state.shutdown_event);
+    g_presenter_state.shutdown_event = NULL;
+  }
+
+  DeleteCriticalSection(&g_presenter_state.lock);
+  destroyPresentState(window);
+  ZeroMemory(&g_presenter_state, sizeof(g_presenter_state));
   TracyCZoneEnd(tracy_zone);
 }
 
@@ -346,200 +717,341 @@ static float getSeconds(void)
 static void render(C3DTexture* texture)
 {
   TracyCZoneN(tracy_zone, "render", 1);
-  if (!initializeRenderState())
   {
-    clearFallback(texture, 255, 0, 255);
-    TracyCZoneEnd(tracy_zone);
-    return;
+    TracyCZoneN(init_zone, "render.initializeRenderState", 1);
+    if (!initializeRenderState())
+    {
+      TracyCZoneN(fallback_zone, "render.fallback.init", 1);
+      clearFallback(texture, 255, 0, 255);
+      TracyCZoneEnd(fallback_zone);
+      TracyCZoneEnd(init_zone);
+      TracyCZoneEnd(tracy_zone);
+      return;
+    }
+    TracyCZoneEnd(init_zone);
   }
 
   C3DTextureInfo target_info = {0};
-  if (!c3dGetTextureInfo(texture, &target_info))
   {
-    clearFallback(texture, 255, 0, 255);
-    TracyCZoneEnd(tracy_zone);
-    return;
+    TracyCZoneN(info_zone, "render.getTargetInfo", 1);
+    if (!c3dGetTextureInfo(texture, &target_info))
+    {
+      TracyCZoneN(fallback_zone, "render.fallback.targetInfo", 1);
+      clearFallback(texture, 255, 0, 255);
+      TracyCZoneEnd(fallback_zone);
+      TracyCZoneEnd(info_zone);
+      TracyCZoneEnd(tracy_zone);
+      return;
+    }
+    TracyCZoneEnd(info_zone);
   }
+  TracyCPlotI("C3D Render Target Width", (int64_t)target_info.width);
+  TracyCPlotI("C3D Render Target Height", (int64_t)target_info.height);
 
-  if (!ensureDepthTexture(target_info.width, target_info.height))
   {
-    clearFallback(texture, 255, 0, 255);
-    TracyCZoneEnd(tracy_zone);
-    return;
+    TracyCZoneN(depth_zone, "render.ensureDepthTexture", 1);
+    if (!ensureDepthTexture(target_info.width, target_info.height))
+    {
+      TracyCZoneN(fallback_zone, "render.fallback.depth", 1);
+      clearFallback(texture, 255, 0, 255);
+      TracyCZoneEnd(fallback_zone);
+      TracyCZoneEnd(depth_zone);
+      TracyCZoneEnd(tracy_zone);
+      return;
+    }
+    TracyCZoneEnd(depth_zone);
   }
 
   uint8_t clear_color[4] = {18, 22, 30, 255};
-  if (!c3dClearTexture(texture, clear_color))
   {
-    clearFallback(texture, 255, 0, 255);
-    TracyCZoneEnd(tracy_zone);
-    return;
+    TracyCZoneN(clear_zone, "render.clearTarget", 1);
+    if (!c3dClearTexture(texture, clear_color))
+    {
+      TracyCZoneN(fallback_zone, "render.fallback.clear", 1);
+      clearFallback(texture, 255, 0, 255);
+      TracyCZoneEnd(fallback_zone);
+      TracyCZoneEnd(clear_zone);
+      TracyCZoneEnd(tracy_zone);
+      return;
+    }
+    TracyCZoneEnd(clear_zone);
   }
 
   float t = getSeconds();
-  float scale_x = 0.45f + (0.08f * sinf(t * 1.2f));
-  float scale_y = 0.45f + (0.10f * cosf(t * 0.9f));
-  float angle = t * 0.85f;
-  float s = sinf(angle);
-  float c = cosf(angle);
+  float scale_x = 0.0f;
+  float scale_y = 0.0f;
+  float angle = 0.0f;
+  float s = 0.0f;
+  float c = 0.0f;
+  {
+    TracyCZoneN(anim_zone, "render.animate", 1);
+    scale_x = 0.45f + (0.08f * sinf(t * 1.2f));
+    scale_y = 0.45f + (0.10f * cosf(t * 0.9f));
+    angle = t * 0.85f;
+    s = sinf(angle);
+    c = cosf(angle);
+    TracyCZoneEnd(anim_zone);
+  }
 
   C3DVertex quad_vertices[4] = {0};
-  float corners[4][2] = {
-      {-scale_x, -scale_y},
-      { scale_x, -scale_y},
-      { scale_x,  scale_y},
-      {-scale_x,  scale_y},
-  };
-  float uvs[4][2] = {
-      {0.0f, 1.0f},
-      {1.0f, 1.0f},
-      {1.0f, 0.0f},
-      {0.0f, 0.0f},
-  };
-  float colors[4][4] = {
-      { 1.0f, 0.45f, 0.35f, 0.90f},
-      {0.25f, 0.95f, 0.55f, 0.90f},
-      {0.30f, 0.65f, 1.00f, 0.90f},
-      {1.00f, 0.90f, 0.30f, 0.90f},
-  };
-
-  for (size_t i = 0; i < 4; ++i)
   {
-    float x = corners[i][0];
-    float y = corners[i][1];
-    quad_vertices[i].pos[0] = (x * c) - (y * s);
-    quad_vertices[i].pos[1] = (x * s) + (y * c);
-    quad_vertices[i].pos[2] = 0.0f;
-    quad_vertices[i].pos[3] = 1.0f;
-    quad_vertices[i].col[0] = colors[i][0];
-    quad_vertices[i].col[1] = colors[i][1];
-    quad_vertices[i].col[2] = colors[i][2];
-    quad_vertices[i].col[3] = colors[i][3];
-    quad_vertices[i].uv[0] = uvs[i][0];
-    quad_vertices[i].uv[1] = uvs[i][1];
-    quad_vertices[i].texid = 0;
+    TracyCZoneN(quad_cpu_zone, "render.buildQuadVertices", 1);
+    float corners[4][2] = {
+        {-scale_x, -scale_y},
+        { scale_x, -scale_y},
+        { scale_x,  scale_y},
+        {-scale_x,  scale_y},
+    };
+    float uvs[4][2] = {
+        {0.0f, 1.0f},
+        {1.0f, 1.0f},
+        {1.0f, 0.0f},
+        {0.0f, 0.0f},
+    };
+    float colors[4][4] = {
+        { 1.0f, 0.45f, 0.35f, 0.90f},
+        {0.25f, 0.95f, 0.55f, 0.90f},
+        {0.30f, 0.65f, 1.00f, 0.90f},
+        {1.00f, 0.90f, 0.30f, 0.90f},
+    };
+
+    for (size_t i = 0; i < 4; ++i)
+    {
+      float x = corners[i][0];
+      float y = corners[i][1];
+      quad_vertices[i].pos[0] = (x * c) - (y * s);
+      quad_vertices[i].pos[1] = (x * s) + (y * c);
+      quad_vertices[i].pos[2] = 0.0f;
+      quad_vertices[i].pos[3] = 1.0f;
+      quad_vertices[i].col[0] = colors[i][0];
+      quad_vertices[i].col[1] = colors[i][1];
+      quad_vertices[i].col[2] = colors[i][2];
+      quad_vertices[i].col[3] = colors[i][3];
+      quad_vertices[i].uv[0] = uvs[i][0];
+      quad_vertices[i].uv[1] = uvs[i][1];
+      quad_vertices[i].texid = 0;
+    }
+    TracyCZoneEnd(quad_cpu_zone);
   }
 
   void* quad_stage_data = NULL;
-  quad_stage_data = c3dMapStageBuffer(g_render_state.quad_upload_stage, C3D_MEMORY_ACCESS_WRITE);
-  if (!quad_stage_data)
   {
-    clearFallback(texture, 255, 32, 32);
-    TracyCZoneEnd(tracy_zone);
-    return;
+    TracyCZoneN(quad_map_zone, "render.mapQuadStage", 1);
+    quad_stage_data = c3dMapStageBuffer(g_render_state.quad_upload_stage, C3D_MEMORY_ACCESS_WRITE);
+    if (!quad_stage_data)
+    {
+      TracyCZoneN(fallback_zone, "render.fallback.mapQuadStage", 1);
+      clearFallback(texture, 255, 32, 32);
+      TracyCZoneEnd(fallback_zone);
+      TracyCZoneEnd(quad_map_zone);
+      TracyCZoneEnd(tracy_zone);
+      return;
+    }
+    TracyCZoneEnd(quad_map_zone);
   }
-  memcpy(quad_stage_data, quad_vertices, sizeof(quad_vertices));
-  c3dUnmapStageBuffer(g_render_state.quad_upload_stage);
-
-  if (!c3dWriteBuffer(g_render_state.quad_vertices, 0, sizeof(quad_vertices), g_render_state.quad_upload_stage, 0))
   {
-    clearFallback(texture, 255, 32, 32);
-    TracyCZoneEnd(tracy_zone);
-    return;
+    TracyCZoneN(quad_copy_zone, "render.copyQuadStage", 1);
+    memcpy(quad_stage_data, quad_vertices, sizeof(quad_vertices));
+    TracyCZoneEnd(quad_copy_zone);
+  }
+  {
+    TracyCZoneN(quad_unmap_zone, "render.unmapQuadStage", 1);
+    c3dUnmapStageBuffer(g_render_state.quad_upload_stage);
+    TracyCZoneEnd(quad_unmap_zone);
+  }
+
+  {
+    TracyCZoneN(quad_upload_zone, "render.uploadQuadVertices", 1);
+    if (!c3dWriteBuffer(g_render_state.quad_vertices, 0, sizeof(quad_vertices), g_render_state.quad_upload_stage, 0))
+    {
+      TracyCZoneN(fallback_zone, "render.fallback.uploadQuad", 1);
+      clearFallback(texture, 255, 32, 32);
+      TracyCZoneEnd(fallback_zone);
+      TracyCZoneEnd(quad_upload_zone);
+      TracyCZoneEnd(tracy_zone);
+      return;
+    }
+    TracyCZoneEnd(quad_upload_zone);
   }
 
   float pulse = 0.65f + (0.35f * sinf(t * 2.5f));
   C3DVertex line_vertices[4] = {0};
-  line_vertices[0].pos[0] = -0.95f;
-  line_vertices[0].pos[1] = 0.0f;
-  line_vertices[1].pos[0] = 0.95f;
-  line_vertices[1].pos[1] = 0.0f;
-  line_vertices[2].pos[0] = 0.0f;
-  line_vertices[2].pos[1] = -0.95f;
-  line_vertices[3].pos[0] = 0.0f;
-  line_vertices[3].pos[1] = 0.95f;
-  for (size_t i = 0; i < 4; ++i)
   {
-    line_vertices[i].pos[2] = 0.0f;
-    line_vertices[i].pos[3] = 1.0f;
-    line_vertices[i].col[0] = 0.15f + (0.85f * pulse);
-    line_vertices[i].col[1] = 0.25f + (0.20f * pulse);
-    line_vertices[i].col[2] = 1.00f;
-    line_vertices[i].col[3] = 0.55f;
-    line_vertices[i].uv[0] = 0.0f;
-    line_vertices[i].uv[1] = 0.0f;
-    line_vertices[i].texid = -1;
+    TracyCZoneN(line_cpu_zone, "render.buildLineVertices", 1);
+    line_vertices[0].pos[0] = -0.95f;
+    line_vertices[0].pos[1] = 0.0f;
+    line_vertices[1].pos[0] = 0.95f;
+    line_vertices[1].pos[1] = 0.0f;
+    line_vertices[2].pos[0] = 0.0f;
+    line_vertices[2].pos[1] = -0.95f;
+    line_vertices[3].pos[0] = 0.0f;
+    line_vertices[3].pos[1] = 0.95f;
+    for (size_t i = 0; i < 4; ++i)
+    {
+      line_vertices[i].pos[2] = 0.0f;
+      line_vertices[i].pos[3] = 1.0f;
+      line_vertices[i].col[0] = 0.15f + (0.85f * pulse);
+      line_vertices[i].col[1] = 0.25f + (0.20f * pulse);
+      line_vertices[i].col[2] = 1.00f;
+      line_vertices[i].col[3] = 0.55f;
+      line_vertices[i].uv[0] = 0.0f;
+      line_vertices[i].uv[1] = 0.0f;
+      line_vertices[i].texid = -1;
+    }
+    TracyCZoneEnd(line_cpu_zone);
   }
 
   void* line_stage_data = NULL;
-  line_stage_data = c3dMapStageBuffer(g_render_state.line_upload_stage, C3D_MEMORY_ACCESS_WRITE);
-  if (!line_stage_data)
   {
-    clearFallback(texture, 255, 32, 32);
-    TracyCZoneEnd(tracy_zone);
-    return;
+    TracyCZoneN(line_map_zone, "render.mapLineStage", 1);
+    line_stage_data = c3dMapStageBuffer(g_render_state.line_upload_stage, C3D_MEMORY_ACCESS_WRITE);
+    if (!line_stage_data)
+    {
+      TracyCZoneN(fallback_zone, "render.fallback.mapLineStage", 1);
+      clearFallback(texture, 255, 32, 32);
+      TracyCZoneEnd(fallback_zone);
+      TracyCZoneEnd(line_map_zone);
+      TracyCZoneEnd(tracy_zone);
+      return;
+    }
+    TracyCZoneEnd(line_map_zone);
   }
-  memcpy(line_stage_data, line_vertices, sizeof(line_vertices));
-  c3dUnmapStageBuffer(g_render_state.line_upload_stage);
-
-  if (!c3dWriteBuffer(g_render_state.line_vertices, 0, sizeof(line_vertices), g_render_state.line_upload_stage, 0))
   {
-    clearFallback(texture, 255, 32, 32);
-    TracyCZoneEnd(tracy_zone);
-    return;
+    TracyCZoneN(line_copy_zone, "render.copyLineStage", 1);
+    memcpy(line_stage_data, line_vertices, sizeof(line_vertices));
+    TracyCZoneEnd(line_copy_zone);
+  }
+  {
+    TracyCZoneN(line_unmap_zone, "render.unmapLineStage", 1);
+    c3dUnmapStageBuffer(g_render_state.line_upload_stage);
+    TracyCZoneEnd(line_unmap_zone);
+  }
+
+  {
+    TracyCZoneN(line_upload_zone, "render.uploadLineVertices", 1);
+    if (!c3dWriteBuffer(g_render_state.line_vertices, 0, sizeof(line_vertices), g_render_state.line_upload_stage, 0))
+    {
+      TracyCZoneN(fallback_zone, "render.fallback.uploadLine", 1);
+      clearFallback(texture, 255, 32, 32);
+      TracyCZoneEnd(fallback_zone);
+      TracyCZoneEnd(line_upload_zone);
+      TracyCZoneEnd(tracy_zone);
+      return;
+    }
+    TracyCZoneEnd(line_upload_zone);
   }
 
   C3DTextureBinding binding = {};
-  binding.sampler = C3D_SAMPLER_LINEAR_WRAP;
-  binding.texture = g_render_state.texture;
+  {
+    TracyCZoneN(binding_zone, "render.buildTextureBinding", 1);
+    binding.sampler = C3D_SAMPLER_LINEAR_WRAP;
+    binding.texture = g_render_state.texture;
+    TracyCZoneEnd(binding_zone);
+  }
 
   C3DRenderPassInfo render_pass = {0};
-  render_pass.target = texture;
-  render_pass.depthTarget = g_render_state.depth_texture;
-  render_pass.viewport.x = 0;
-  render_pass.viewport.y = 0;
-  render_pass.viewport.width = target_info.width;
-  render_pass.viewport.height = target_info.height;
-  render_pass.targetBlend = C3D_BLEND_MODE_NORMAL;
-  render_pass.textureBindings = &binding;
-  render_pass.textureBindCount = 1;
-
-  if (!c3dBeginRenderPass(g_render_state.command_buffer, &render_pass))
   {
-    clearFallback(texture, 255, 128, 0);
-    TracyCZoneEnd(tracy_zone);
-    return;
+    TracyCZoneN(pass_info_zone, "render.buildRenderPassInfo", 1);
+    render_pass.target = texture;
+    render_pass.depthTarget = g_render_state.depth_texture;
+    render_pass.viewport.x = 0;
+    render_pass.viewport.y = 0;
+    render_pass.viewport.width = target_info.width;
+    render_pass.viewport.height = target_info.height;
+    render_pass.targetBlend = C3D_BLEND_MODE_NORMAL;
+    render_pass.textureBindings = &binding;
+    render_pass.textureBindCount = 1;
+    TracyCZoneEnd(pass_info_zone);
+  }
+
+  {
+    TracyCZoneN(begin_pass_zone, "render.beginRenderPass", 1);
+    if (!c3dBeginRenderPass(g_render_state.command_buffer, &render_pass))
+    {
+      TracyCZoneN(fallback_zone, "render.fallback.beginRenderPass", 1);
+      clearFallback(texture, 255, 128, 0);
+      TracyCZoneEnd(fallback_zone);
+      TracyCZoneEnd(begin_pass_zone);
+      TracyCZoneEnd(tracy_zone);
+      return;
+    }
+    TracyCZoneEnd(begin_pass_zone);
   }
 
   C3DDrawInfo quad_draw = {};
-  quad_draw.topology = C3D_TOPOLOGY_QUAD;
-  quad_draw.indexSize = C3D_INDEX_SIZE_16;
-  quad_draw.indexBuffer = g_render_state.quad_indices;
-  quad_draw.indexOffset = 0;
-  quad_draw.indexBase = 0;
-  quad_draw.vertexBuffer = g_render_state.quad_vertices;
-  quad_draw.vertexOffset = 0;
-  quad_draw.count = 4;
-
-  if (!c3dDraw(g_render_state.command_buffer, &quad_draw))
   {
-    c3dCancelCommandBuffer(g_render_state.command_buffer);
-    clearFallback(texture, 255, 128, 0);
-    TracyCZoneEnd(tracy_zone);
-    return;
+    TracyCZoneN(quad_draw_info_zone, "render.buildQuadDrawInfo", 1);
+    quad_draw.topology = C3D_TOPOLOGY_QUAD;
+    quad_draw.indexSize = C3D_INDEX_SIZE_16;
+    quad_draw.indexBuffer = g_render_state.quad_indices;
+    quad_draw.indexOffset = 0;
+    quad_draw.indexBase = 0;
+    quad_draw.vertexBuffer = g_render_state.quad_vertices;
+    quad_draw.vertexOffset = 0;
+    quad_draw.count = 4;
+    TracyCZoneEnd(quad_draw_info_zone);
+  }
+
+  {
+    TracyCZoneN(quad_draw_zone, "render.recordQuadDraw", 1);
+    if (!c3dDraw(g_render_state.command_buffer, &quad_draw))
+    {
+      TracyCZoneN(cancel_zone, "render.cancelCommandBuffer.quad", 1);
+      c3dCancelCommandBuffer(g_render_state.command_buffer);
+      TracyCZoneEnd(cancel_zone);
+      TracyCZoneN(fallback_zone, "render.fallback.quadDraw", 1);
+      clearFallback(texture, 255, 128, 0);
+      TracyCZoneEnd(fallback_zone);
+      TracyCZoneEnd(quad_draw_zone);
+      TracyCZoneEnd(tracy_zone);
+      return;
+    }
+    TracyCZoneEnd(quad_draw_zone);
   }
 
   C3DDrawInfo line_draw = {};
-  line_draw.topology = C3D_TOPOLOGY_LINE;
-  line_draw.indexSize = C3D_INDEX_SIZE_16;
-  line_draw.indexBuffer = g_render_state.line_indices;
-  line_draw.indexOffset = 0;
-  line_draw.indexBase = 0;
-  line_draw.vertexBuffer = g_render_state.line_vertices;
-  line_draw.vertexOffset = 0;
-  line_draw.count = 4;
-
-  if (!c3dDraw(g_render_state.command_buffer, &line_draw) || !c3dEndRenderPass(g_render_state.command_buffer))
   {
-    c3dCancelCommandBuffer(g_render_state.command_buffer);
-    clearFallback(texture, 255, 128, 0);
-    TracyCZoneEnd(tracy_zone);
-    return;
+    TracyCZoneN(line_draw_info_zone, "render.buildLineDrawInfo", 1);
+    line_draw.topology = C3D_TOPOLOGY_LINE;
+    line_draw.indexSize = C3D_INDEX_SIZE_16;
+    line_draw.indexBuffer = g_render_state.line_indices;
+    line_draw.indexOffset = 0;
+    line_draw.indexBase = 0;
+    line_draw.vertexBuffer = g_render_state.line_vertices;
+    line_draw.vertexOffset = 0;
+    line_draw.count = 4;
+    TracyCZoneEnd(line_draw_info_zone);
   }
 
-  if (!c3dSubmitCommandBuffer(g_render_state.command_buffer))
   {
-    clearFallback(texture, 255, 255, 0);
+    TracyCZoneN(line_draw_zone, "render.recordLineDraw", 1);
+    bool line_draw_ok = c3dDraw(g_render_state.command_buffer, &line_draw);
+    TracyCZoneEnd(line_draw_zone);
+    TracyCZoneN(end_pass_zone, "render.endRenderPass", 1);
+    bool end_pass_ok = line_draw_ok && c3dEndRenderPass(g_render_state.command_buffer);
+    TracyCZoneEnd(end_pass_zone);
+    if (!end_pass_ok)
+    {
+      TracyCZoneN(cancel_zone, "render.cancelCommandBuffer.lineOrEndPass", 1);
+      c3dCancelCommandBuffer(g_render_state.command_buffer);
+      TracyCZoneEnd(cancel_zone);
+      TracyCZoneN(fallback_zone, "render.fallback.lineOrEndPass", 1);
+      clearFallback(texture, 255, 128, 0);
+      TracyCZoneEnd(fallback_zone);
+      TracyCZoneEnd(tracy_zone);
+      return;
+    }
+  }
+
+  {
+    TracyCZoneN(submit_zone, "render.submitCommandBuffer", 1);
+    if (!c3dSubmitCommandBuffer(g_render_state.command_buffer))
+    {
+      TracyCZoneN(fallback_zone, "render.fallback.submit", 1);
+      clearFallback(texture, 255, 255, 0);
+      TracyCZoneEnd(fallback_zone);
+    }
+    TracyCZoneEnd(submit_zone);
   }
 
   TracyCZoneEnd(tracy_zone);
@@ -624,57 +1136,59 @@ static bool pollMessages(void)
   return true;
 }
 
-static void presentToWindow(HWND window, C3DTexture* texture, const C3DTextureInfo* info)
+static void presentToWindow(C3DTexture* texture, const C3DTextureInfo* info)
 {
   TracyCZoneN(tracy_zone, "presentToWindow", 1);
-  struct
-  {
-    BITMAPINFOHEADER header;
-    DWORD masks[4];
-  } bitmap_info = {0};
-  bitmap_info.header.biSize = sizeof(bitmap_info.header);
-  bitmap_info.header.biWidth = info->width;
-  bitmap_info.header.biHeight = -info->height;
-  bitmap_info.header.biPlanes = 1;
-  bitmap_info.header.biBitCount = 32;
-  bitmap_info.header.biCompression = BI_BITFIELDS;
-  bitmap_info.masks[0] = 0x000000FFu;
-  bitmap_info.masks[1] = 0x0000FF00u;
-  bitmap_info.masks[2] = 0x00FF0000u;
-  bitmap_info.masks[3] = 0xFF000000u;
-
   size_t size = info->width * info->height * 4;
-  if (!ensureStageBufferSize(&g_render_state.readback_stage, size) || !c3dReadTexture(texture, 0, size, g_render_state.readback_stage, 0))
+  TracyCPlotI("C3D Present Width", (int64_t)info->width);
+  TracyCPlotI("C3D Present Height", (int64_t)info->height);
+  TracyCPlotI("C3D Present Readback Bytes", (int64_t)size);
+
+  PresentSlot* slot = NULL;
   {
+    TracyCZoneN(acquire_zone, "presentToWindow.acquireSlot", 1);
+    EnterCriticalSection(&g_presenter_state.lock);
+    for (size_t i = 0; i < _countof(g_presenter_state.slots); ++i)
+    {
+      if (g_presenter_state.slots[i].state == PRESENT_SLOT_FREE)
+      {
+        slot = &g_presenter_state.slots[i];
+        slot->state = PRESENT_SLOT_PRESENTING;
+        slot->info = *info;
+        slot->sequence = ++g_presenter_state.next_sequence;
+        break;
+      }
+    }
+    LeaveCriticalSection(&g_presenter_state.lock);
+    TracyCZoneEnd(acquire_zone);
+  }
+
+  if (!slot)
+  {
+    TracyCZoneN(drop_zone, "presentToWindow.dropFrame", 1);
+    TracyCZoneEnd(drop_zone);
     TracyCZoneEnd(tracy_zone);
     return;
   }
 
-  void* buffer = NULL;
-  buffer = c3dMapStageBuffer(g_render_state.readback_stage, C3D_MEMORY_ACCESS_READ);
-  if (!buffer)
   {
-    TracyCZoneEnd(tracy_zone);
-    return;
+    TracyCZoneN(readback_zone, "presentToWindow.readbackTexture", 1);
+    bool readback_ok = c3dReadTexture(texture, 0, size, slot->stage_buffer, 0);
+    if (!readback_ok)
+    {
+      EnterCriticalSection(&g_presenter_state.lock);
+      slot->state = PRESENT_SLOT_FREE;
+      LeaveCriticalSection(&g_presenter_state.lock);
+      TracyCZoneEnd(readback_zone);
+      TracyCZoneEnd(tracy_zone);
+      return;
+    }
+    TracyCZoneEnd(readback_zone);
   }
-
-  HDC device_context = GetDC(window);
-  StretchDIBits(
-      device_context,
-      0,
-      0,
-      info->width,
-      info->height,
-      0,
-      0,
-      info->width,
-      info->height,
-      buffer,
-      (BITMAPINFO*)&bitmap_info,
-      DIB_RGB_COLORS,
-      SRCCOPY);
-  ReleaseDC(window, device_context);
-  c3dUnmapStageBuffer(g_render_state.readback_stage);
+  EnterCriticalSection(&g_presenter_state.lock);
+  slot->state = PRESENT_SLOT_READY;
+  LeaveCriticalSection(&g_presenter_state.lock);
+  SetEvent(g_presenter_state.wake_event);
   TracyCZoneEnd(tracy_zone);
 }
 
@@ -741,6 +1255,15 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR comman
     TracyCZoneEnd(tracy_zone);
     return 1;
   }
+
+  if (!initializePresenter(window, backbufferInfo.width, backbufferInfo.height))
+  {
+    c3dDeleteTexture(backbuffer);
+    shutdownPresenter(window);
+    DestroyWindow(window);
+    TracyCZoneEnd(tracy_zone);
+    return 1;
+  }
   LARGE_INTEGER performance_frequency;
   QueryPerformanceFrequency(&performance_frequency);
   LARGE_INTEGER last_frame_counter;
@@ -770,8 +1293,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR comman
       TracyCPlotI("C3D Backbuffer Height", backbufferInfo.height);
       c3dDeleteTexture(backbuffer);
       backbuffer = c3dCreateTexture(&backbufferInfo);
+      bool presenter_ok = backbuffer && ensurePresenterSlots(backbufferInfo.width, backbufferInfo.height);
       TracyCZoneEnd(resize_zone);
-      if (!backbuffer)
+      if (!presenter_ok)
       {
         TracyCZoneEnd(frame_zone);
         break;
@@ -779,7 +1303,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR comman
     }
 
     render(backbuffer);
-    presentToWindow(window, backbuffer, &backbufferInfo);
+    presentToWindow(backbuffer, &backbufferInfo);
 
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
@@ -791,6 +1315,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR comman
   }
 
   destroyRenderState();
+  shutdownPresenter(window);
   c3dDeleteTexture(backbuffer);
   DestroyWindow(window);
   TracyCZoneEnd(tracy_zone);
