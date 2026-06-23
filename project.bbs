@@ -19,6 +19,7 @@ filter(
   additional_compile_args("/UTRACY_ENABLE")
   opt_level(speed_3)
   warning_level(medium)
+  defines(C3D_EXPORT_LIB C3D_UNSAFE)
 )
 
 filter(
@@ -32,7 +33,7 @@ filter(
   release-profile
   opt_level(speed_3)
   warning_level(medium)
-  defines(C3D_EXPORT_LIB TRACY_ENABLE)
+  defines(C3D_EXPORT_LIB TRACY_ENABLE C3D_UNSAFE)
 )
 
 targets(

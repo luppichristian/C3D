@@ -232,7 +232,7 @@ C3D_API bool c3dFillTexture(C3DTexture* texture, size_t offset, size_t size, voi
   const int blockCount = (int)((texelCount + (size_t)threadsPerBlock - 1) / (size_t)threadsPerBlock);
   uint32_t* destination = (uint32_t*)texture->data + texelOffset;
   c3dFillTextureKernel<<<blockCount, threadsPerBlock>>>(destination, texelCount, value);
-  return c3dCheckCUDA(cudaPeekAtLastError(), "texture fill kernel launch failed") && c3dCheckCUDA(cudaDeviceSynchronize(), "texture fill kernel execution failed");
+  return c3dCheckKernelLaunch("texture fill kernel launch failed") && c3dCheckKernelExecution("texture fill kernel execution failed");
 }
 
 C3D_API bool c3dClearTexture(C3DTexture* texture, void* texel)

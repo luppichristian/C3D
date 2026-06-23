@@ -116,6 +116,11 @@ static bool c3dIsColorTextureFormat(C3DTextureFormat format)
 
 static bool c3dResolveViewport(C3DTexture* target, C3DViewport source, C3DViewport* resolved)
 {
+#if defined(C3D_UNSAFE)
+  (void)target;
+  *resolved = source;
+  return true;
+#else
   if (!target || !resolved)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "target texture and viewport output must be non-null");
@@ -158,10 +163,15 @@ static bool c3dResolveViewport(C3DTexture* target, C3DViewport source, C3DViewpo
   }
 
   return true;
+#endif
 }
 
 static bool c3dValidateRenderPass(const C3DRenderPassInfo* renderPass)
 {
+#if defined(C3D_UNSAFE)
+  (void)renderPass;
+  return true;
+#else
   if (!renderPass)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "render pass info must be non-null");
@@ -242,6 +252,7 @@ static bool c3dValidateRenderPass(const C3DRenderPassInfo* renderPass)
   }
 
   return true;
+#endif
 }
 
 static bool c3dCopyRenderPassInfo(C3DRenderPassInfo* destination, const C3DRenderPassInfo* source)
@@ -273,6 +284,10 @@ static bool c3dCopyRenderPassInfo(C3DRenderPassInfo* destination, const C3DRende
 
 static bool c3dValidateDrawInfo(const C3DDrawInfo* drawInfo)
 {
+#if defined(C3D_UNSAFE)
+  (void)drawInfo;
+  return true;
+#else
   if (!drawInfo)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "draw info must be non-null");
@@ -311,6 +326,7 @@ static bool c3dValidateDrawInfo(const C3DDrawInfo* drawInfo)
   }
 
   return true;
+#endif
 }
 
 C3D_API C3DCommandBuffer* c3dCreateCommandBuffer(void)
@@ -332,12 +348,14 @@ C3D_API C3DCommandBuffer* c3dCreateCommandBuffer(void)
 C3D_API bool c3dDeleteCommandBuffer(C3DCommandBuffer* commandBuffer)
 {
   TracyCZoneN(zone, "c3dDeleteCommandBuffer", 1);
+#if !defined(C3D_UNSAFE)
   if (!commandBuffer)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "command buffer must be non-null");
     TracyCZoneEnd(zone);
     return false;
   }
+#endif
 
   c3dResetRenderPassInfo(&commandBuffer->renderPass);
   c3dReleaseCommandBufferScratch(commandBuffer);
@@ -350,12 +368,14 @@ C3D_API bool c3dDeleteCommandBuffer(C3DCommandBuffer* commandBuffer)
 C3D_API bool c3dCancelCommandBuffer(C3DCommandBuffer* commandBuffer)
 {
   TracyCZoneN(zone, "c3dCancelCommandBuffer", 1);
+#if !defined(C3D_UNSAFE)
   if (!commandBuffer)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "command buffer must be non-null");
     TracyCZoneEnd(zone);
     return false;
   }
+#endif
 
   c3dResetCommandBuffer(commandBuffer);
   TracyCZoneEnd(zone);
@@ -365,6 +385,7 @@ C3D_API bool c3dCancelCommandBuffer(C3DCommandBuffer* commandBuffer)
 C3D_API bool c3dBeginRenderPass(C3DCommandBuffer* commandBuffer, C3DRenderPassInfo* renderPass)
 {
   TracyCZoneN(zone, "c3dBeginRenderPass", 1);
+#if !defined(C3D_UNSAFE)
   if (!commandBuffer)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "command buffer must be non-null");
@@ -378,6 +399,7 @@ C3D_API bool c3dBeginRenderPass(C3DCommandBuffer* commandBuffer, C3DRenderPassIn
     TracyCZoneEnd(zone);
     return false;
   }
+#endif
 
   if (!c3dValidateRenderPass(renderPass))
   {
@@ -408,6 +430,7 @@ C3D_API bool c3dBeginRenderPass(C3DCommandBuffer* commandBuffer, C3DRenderPassIn
 C3D_API bool c3dEndRenderPass(C3DCommandBuffer* commandBuffer)
 {
   TracyCZoneN(zone, "c3dEndRenderPass", 1);
+#if !defined(C3D_UNSAFE)
   if (!commandBuffer)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "command buffer must be non-null");
@@ -421,6 +444,7 @@ C3D_API bool c3dEndRenderPass(C3DCommandBuffer* commandBuffer)
     TracyCZoneEnd(zone);
     return false;
   }
+#endif
 
   commandBuffer->inRenderPass = false;
   TracyCZoneEnd(zone);
@@ -430,6 +454,7 @@ C3D_API bool c3dEndRenderPass(C3DCommandBuffer* commandBuffer)
 C3D_API bool c3dDraw(C3DCommandBuffer* commandBuffer, const C3DDrawInfo* drawInfo)
 {
   TracyCZoneN(zone, "c3dDraw", 1);
+#if !defined(C3D_UNSAFE)
   if (!commandBuffer)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "command buffer must be non-null");
@@ -443,6 +468,7 @@ C3D_API bool c3dDraw(C3DCommandBuffer* commandBuffer, const C3DDrawInfo* drawInf
     TracyCZoneEnd(zone);
     return false;
   }
+#endif
 
   if (!c3dValidateDrawInfo(drawInfo))
   {

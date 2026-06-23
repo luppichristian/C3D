@@ -9,6 +9,13 @@
 
 static bool c3dCheckBufferTransferRange(C3DBuffer* buffer, size_t offset, size_t size, const char* desc)
 {
+#if defined(C3D_UNSAFE)
+  (void)buffer;
+  (void)offset;
+  (void)size;
+  (void)desc;
+  return true;
+#else
   if (!buffer)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "buffer must be non-null");
@@ -16,10 +23,18 @@ static bool c3dCheckBufferTransferRange(C3DBuffer* buffer, size_t offset, size_t
   }
 
   return c3dCheckRange(buffer->info.size, offset, size, desc);
+#endif
 }
 
 static bool c3dCheckStageTransferRange(C3DStageBuffer* stageBuffer, size_t offset, size_t size, const char* desc)
 {
+#if defined(C3D_UNSAFE)
+  (void)stageBuffer;
+  (void)offset;
+  (void)size;
+  (void)desc;
+  return true;
+#else
   if (!stageBuffer)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "stage buffer must be non-null");
@@ -27,6 +42,7 @@ static bool c3dCheckStageTransferRange(C3DStageBuffer* stageBuffer, size_t offse
   }
 
   return c3dCheckRange(stageBuffer->info.size, offset, size, desc);
+#endif
 }
 
 static bool c3dTryResizeBuffer(C3DBuffer* buffer, size_t size, const char* desc)
@@ -95,12 +111,14 @@ static bool c3dTryResizeBuffer(C3DBuffer* buffer, size_t size, const char* desc)
 C3D_API C3DBuffer* c3dCreateBuffer(const C3DBufferInfo* info)
 {
   TracyCZoneN(zone, "c3dCreateBuffer", 1);
+#if !defined(C3D_UNSAFE)
   if (!info)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "buffer info must be non-null");
     TracyCZoneEnd(zone);
     return nullptr;
   }
+#endif
 
   C3DBuffer* buffer = (C3DBuffer*)malloc(sizeof(C3DBuffer));
   if (!buffer)
@@ -125,12 +143,14 @@ C3D_API C3DBuffer* c3dCreateBuffer(const C3DBufferInfo* info)
 C3D_API bool c3dDeleteBuffer(C3DBuffer* buffer)
 {
   TracyCZoneN(zone, "c3dDeleteBuffer", 1);
+#if !defined(C3D_UNSAFE)
   if (!buffer)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "buffer must be non-null");
     TracyCZoneEnd(zone);
     return false;
   }
+#endif
 
   free(buffer->hostData);
   if (buffer->deviceData && !c3dCheckCUDA(cudaFree(buffer->deviceData), "cudaFree failed while deleting buffer"))
@@ -148,12 +168,14 @@ C3D_API bool c3dDeleteBuffer(C3DBuffer* buffer)
 C3D_API bool c3dResizeBuffer(C3DBuffer* buffer, size_t size)
 {
   TracyCZoneN(zone, "c3dResizeBuffer", 1);
+#if !defined(C3D_UNSAFE)
   if (!buffer)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "buffer must be non-null");
     TracyCZoneEnd(zone);
     return false;
   }
+#endif
 
   bool result = c3dTryResizeBuffer(buffer, size, "failed to resize buffer storage");
   TracyCZoneEnd(zone);
@@ -162,11 +184,13 @@ C3D_API bool c3dResizeBuffer(C3DBuffer* buffer, size_t size)
 
 C3D_API bool c3dGetBufferInfo(C3DBuffer* buffer, C3DBufferInfo* info)
 {
+#if !defined(C3D_UNSAFE)
   if (!buffer || !info)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "buffer and info output must be non-null");
     return false;
   }
+#endif
 
   *info = buffer->info;
   return true;
@@ -228,12 +252,14 @@ C3D_API bool c3dBufferCopy(C3DBuffer* destination, size_t destinationOffset, C3D
     return true;
   }
 
+#if !defined(C3D_UNSAFE)
   if (destination == source && destinationOffset < sourceOffset + size && sourceOffset < destinationOffset + size)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, "overlapping in-place buffer copies are not supported");
     TracyCZoneEnd(zone);
     return false;
   }
+#endif
 
   memmove(destination->hostData + destinationOffset, source->hostData + sourceOffset, size);
   bool result = c3dCheckCUDA(cudaMemcpy(destination->deviceData + destinationOffset, source->deviceData + sourceOffset, size, cudaMemcpyDeviceToDevice), "cudaMemcpy failed while copying buffer");

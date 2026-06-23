@@ -72,6 +72,13 @@ static bool c3dCheckCUDA(cudaError_t error, const char* desc)
 
 static bool c3dCheckRange(size_t totalSize, size_t offset, size_t size, const char* desc)
 {
+#if defined(C3D_UNSAFE)
+  (void)totalSize;
+  (void)offset;
+  (void)size;
+  (void)desc;
+  return true;
+#else
   if (offset > totalSize || size > totalSize - offset)
   {
     c3dThrowError(C3D_ERROR_INVALID_ARGUMENT, desc);
@@ -79,6 +86,27 @@ static bool c3dCheckRange(size_t totalSize, size_t offset, size_t size, const ch
   }
 
   return true;
+#endif
+}
+
+static bool c3dCheckKernelLaunch(const char* desc)
+{
+#if defined(C3D_UNSAFE)
+  (void)desc;
+  return true;
+#else
+  return c3dCheckCUDA(cudaPeekAtLastError(), desc);
+#endif
+}
+
+static bool c3dCheckKernelExecution(const char* desc)
+{
+#if defined(C3D_UNSAFE)
+  (void)desc;
+  return true;
+#else
+  return c3dCheckCUDA(cudaDeviceSynchronize(), desc);
+#endif
 }
 
 static __host__ __device__ size_t c3dGetTextureFormatSize(C3DTextureFormat format)
