@@ -6,7 +6,6 @@ ver(0.1.0)
 
 configs(debug release debug-profile release-profile)
 
-
 filter(
   debug
   additional_compile_args("/UTRACY_ENABLE")

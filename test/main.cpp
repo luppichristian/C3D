@@ -19,12 +19,12 @@ typedef struct
   C3DBuffer* line_vertices;
   C3DStageBuffer* quad_upload_stage;
   C3DStageBuffer* line_upload_stage;
-  C3DStageBuffer* readback_stage;
   C3DCommandBuffer* command_buffer;
 } RenderState;
 
 typedef struct
 {
+  HWND window;
   HDC window_dc;
   HDC bitmap_dc;
   HBITMAP dib_bitmap;
@@ -39,35 +39,8 @@ typedef struct
   } bitmap_info;
 } PresentState;
 
-typedef enum
-{
-  PRESENT_SLOT_FREE = 0,
-  PRESENT_SLOT_READY,
-  PRESENT_SLOT_PRESENTING,
-} PresentSlotState;
-
-typedef struct
-{
-  C3DStageBuffer* stage_buffer;
-  C3DTextureInfo info;
-  uint64_t sequence;
-  PresentSlotState state;
-} PresentSlot;
-
-typedef struct
-{
-  HWND window;
-  HANDLE thread;
-  HANDLE wake_event;
-  HANDLE shutdown_event;
-  CRITICAL_SECTION lock;
-  PresentSlot slots[3];
-  uint64_t next_sequence;
-} PresenterState;
-
 static RenderState g_render_state = {0};
 static PresentState g_present_state = {0};
-static PresenterState g_presenter_state = {0};
 static bool g_error_dialog_shown = false;
 
 static void c3dErrorCallback(C3DErrorID id, const char* desc, C3DErrorLoc loc)
@@ -160,12 +133,6 @@ static void destroyRenderState(void)
     g_render_state.command_buffer = NULL;
   }
 
-  if (g_render_state.readback_stage)
-  {
-    c3dDeleteStageBuffer(g_render_state.readback_stage);
-    g_render_state.readback_stage = NULL;
-  }
-
   if (g_render_state.line_upload_stage)
   {
     c3dDeleteStageBuffer(g_render_state.line_upload_stage);
@@ -218,7 +185,7 @@ static void destroyRenderState(void)
   TracyCZoneEnd(tracy_zone);
 }
 
-static void destroyPresentState(HWND window)
+static void destroyPresentState(void)
 {
   TracyCZoneN(tracy_zone, "destroyPresentState", 1);
   if (g_present_state.bitmap_dc && g_present_state.old_bitmap)
@@ -241,10 +208,11 @@ static void destroyPresentState(HWND window)
 
   if (g_present_state.window_dc)
   {
-    ReleaseDC(window, g_present_state.window_dc);
+    ReleaseDC(g_present_state.window, g_present_state.window_dc);
     g_present_state.window_dc = NULL;
   }
 
+  g_present_state.window = NULL;
   g_present_state.dib_pixels = NULL;
   g_present_state.width = 0;
   g_present_state.height = 0;
@@ -252,9 +220,15 @@ static void destroyPresentState(HWND window)
   TracyCZoneEnd(tracy_zone);
 }
 
-static bool ensurePresentState(HWND window, const C3DTextureInfo* info)
+static bool ensurePresentState(HWND window, size_t width, size_t height)
 {
   TracyCZoneN(tracy_zone, "ensurePresentState", 1);
+  if (!g_present_state.window || g_present_state.window != window)
+  {
+    destroyPresentState();
+    g_present_state.window = window;
+  }
+
   if (!g_present_state.window_dc)
   {
     g_present_state.window_dc = GetDC(window);
@@ -275,14 +249,14 @@ static bool ensurePresentState(HWND window, const C3DTextureInfo* info)
     }
   }
 
-  if (g_present_state.width != info->width || g_present_state.height != info->height)
+  if (g_present_state.width != width || g_present_state.height != height)
   {
-    g_present_state.width = info->width;
-    g_present_state.height = info->height;
+    g_present_state.width = width;
+    g_present_state.height = height;
     ZeroMemory(&g_present_state.bitmap_info, sizeof(g_present_state.bitmap_info));
     g_present_state.bitmap_info.header.biSize = sizeof(g_present_state.bitmap_info.header);
-    g_present_state.bitmap_info.header.biWidth = (LONG)info->width;
-    g_present_state.bitmap_info.header.biHeight = -(LONG)info->height;
+    g_present_state.bitmap_info.header.biWidth = (LONG)width;
+    g_present_state.bitmap_info.header.biHeight = -(LONG)height;
     g_present_state.bitmap_info.header.biPlanes = 1;
     g_present_state.bitmap_info.header.biBitCount = 32;
     g_present_state.bitmap_info.header.biCompression = BI_BITFIELDS;
@@ -318,6 +292,7 @@ static bool ensurePresentState(HWND window, const C3DTextureInfo* info)
         DeleteObject(g_present_state.dib_bitmap);
         g_present_state.dib_bitmap = NULL;
       }
+
       g_present_state.dib_pixels = NULL;
       TracyCZoneEnd(tracy_zone);
       return false;
@@ -338,211 +313,30 @@ static bool ensurePresentState(HWND window, const C3DTextureInfo* info)
   return true;
 }
 
-static bool presenterHasActiveSlot(void)
+static bool presentFrameCallback(void* user_data, const C3DPresentFrame* frame)
 {
-  bool active = false;
-  EnterCriticalSection(&g_presenter_state.lock);
-  for (size_t i = 0; i < _countof(g_presenter_state.slots); ++i)
+  TracyCZoneN(tracy_zone, "presentFrameCallback", 1);
+  HWND window = (HWND)user_data;
+  if (!frame || !ensurePresentState(window, frame->width, frame->height))
   {
-    PresentSlotState state = g_presenter_state.slots[i].state;
-    if (state == PRESENT_SLOT_READY || state == PRESENT_SLOT_PRESENTING)
-    {
-      active = true;
-      break;
-    }
-  }
-  LeaveCriticalSection(&g_presenter_state.lock);
-  return active;
-}
-
-static bool ensurePresenterSlots(size_t width, size_t height)
-{
-  TracyCZoneN(tracy_zone, "ensurePresenterSlots", 1);
-  while (presenterHasActiveSlot())
-  {
-    Sleep(0);
+    TracyCZoneEnd(tracy_zone);
+    return false;
   }
 
-  EnterCriticalSection(&g_presenter_state.lock);
-  for (size_t i = 0; i < _countof(g_presenter_state.slots); ++i)
-  {
-    g_presenter_state.slots[i].state = PRESENT_SLOT_FREE;
-    g_presenter_state.slots[i].sequence = 0;
-    g_presenter_state.slots[i].info.width = width;
-    g_presenter_state.slots[i].info.height = height;
-    g_presenter_state.slots[i].info.depth = 1;
-    g_presenter_state.slots[i].info.format = C3D_TEXTURE_FORMAT_RGBA8;
-  }
-  LeaveCriticalSection(&g_presenter_state.lock);
-
-  for (size_t i = 0; i < _countof(g_presenter_state.slots); ++i)
-  {
-    if (!ensureStageBufferSize(&g_presenter_state.slots[i].stage_buffer, width * height * 4))
-    {
-      TracyCZoneEnd(tracy_zone);
-      return false;
-    }
-  }
-
+  size_t size = frame->rowPitch * frame->height;
+  memcpy(g_present_state.dib_pixels, frame->pixels, size);
+  BitBlt(
+      g_present_state.window_dc,
+      0,
+      0,
+      (int)frame->width,
+      (int)frame->height,
+      g_present_state.bitmap_dc,
+      0,
+      0,
+      SRCCOPY);
   TracyCZoneEnd(tracy_zone);
   return true;
-}
-
-static DWORD WINAPI presenterThreadProc(LPVOID parameter)
-{
-  TracyCZoneN(tracy_zone, "presenterThreadProc", 1);
-  HWND window = (HWND)parameter;
-  HANDLE wait_handles[2] = {g_presenter_state.shutdown_event, g_presenter_state.wake_event};
-
-  for (;;)
-  {
-    DWORD wait_result = WaitForMultipleObjects(2, wait_handles, FALSE, INFINITE);
-    if (wait_result == WAIT_OBJECT_0)
-    {
-      break;
-    }
-
-    for (;;)
-    {
-      PresentSlot* latest_slot = NULL;
-      EnterCriticalSection(&g_presenter_state.lock);
-      for (size_t i = 0; i < _countof(g_presenter_state.slots); ++i)
-      {
-        PresentSlot* slot = &g_presenter_state.slots[i];
-        if (slot->state != PRESENT_SLOT_READY)
-        {
-          continue;
-        }
-
-        if (!latest_slot || slot->sequence > latest_slot->sequence)
-        {
-          latest_slot = slot;
-        }
-      }
-
-      if (latest_slot)
-      {
-        for (size_t i = 0; i < _countof(g_presenter_state.slots); ++i)
-        {
-          PresentSlot* slot = &g_presenter_state.slots[i];
-          if (slot != latest_slot && slot->state == PRESENT_SLOT_READY)
-          {
-            slot->state = PRESENT_SLOT_FREE;
-          }
-        }
-
-        latest_slot->state = PRESENT_SLOT_PRESENTING;
-      }
-      LeaveCriticalSection(&g_presenter_state.lock);
-
-      if (!latest_slot)
-      {
-        break;
-      }
-
-      if (ensurePresentState(window, &latest_slot->info))
-      {
-        size_t size = latest_slot->info.width * latest_slot->info.height * 4;
-        void* buffer = c3dMapStageBuffer(latest_slot->stage_buffer, C3D_MEMORY_ACCESS_READ);
-        if (buffer)
-        {
-          TracyCZoneN(copy_zone, "presenterThread.copyToDibSection", 1);
-          memcpy(g_present_state.dib_pixels, buffer, size);
-          TracyCZoneEnd(copy_zone);
-
-          TracyCZoneN(blit_zone, "presenterThread.BitBlt", 1);
-          BitBlt(
-              g_present_state.window_dc,
-              0,
-              0,
-              (int)latest_slot->info.width,
-              (int)latest_slot->info.height,
-              g_present_state.bitmap_dc,
-              0,
-              0,
-              SRCCOPY);
-          TracyCZoneEnd(blit_zone);
-
-          c3dUnmapStageBuffer(latest_slot->stage_buffer);
-        }
-      }
-
-      EnterCriticalSection(&g_presenter_state.lock);
-      latest_slot->state = PRESENT_SLOT_FREE;
-      LeaveCriticalSection(&g_presenter_state.lock);
-    }
-  }
-
-  TracyCZoneEnd(tracy_zone);
-  return 0;
-}
-
-static bool initializePresenter(HWND window, size_t width, size_t height)
-{
-  TracyCZoneN(tracy_zone, "initializePresenter", 1);
-  ZeroMemory(&g_presenter_state, sizeof(g_presenter_state));
-  g_presenter_state.window = window;
-  InitializeCriticalSection(&g_presenter_state.lock);
-  g_presenter_state.wake_event = CreateEventA(NULL, FALSE, FALSE, NULL);
-  g_presenter_state.shutdown_event = CreateEventA(NULL, TRUE, FALSE, NULL);
-  if (!g_presenter_state.wake_event || !g_presenter_state.shutdown_event)
-  {
-    TracyCZoneEnd(tracy_zone);
-    return false;
-  }
-
-  if (!ensurePresenterSlots(width, height))
-  {
-    TracyCZoneEnd(tracy_zone);
-    return false;
-  }
-
-  g_presenter_state.thread = CreateThread(NULL, 0, presenterThreadProc, window, 0, NULL);
-  bool created = g_presenter_state.thread != NULL;
-  TracyCZoneEnd(tracy_zone);
-  return created;
-}
-
-static void shutdownPresenter(HWND window)
-{
-  TracyCZoneN(tracy_zone, "shutdownPresenter", 1);
-  if (g_presenter_state.shutdown_event)
-  {
-    SetEvent(g_presenter_state.shutdown_event);
-  }
-
-  if (g_presenter_state.thread)
-  {
-    WaitForSingleObject(g_presenter_state.thread, INFINITE);
-    CloseHandle(g_presenter_state.thread);
-    g_presenter_state.thread = NULL;
-  }
-
-  for (size_t i = 0; i < _countof(g_presenter_state.slots); ++i)
-  {
-    if (g_presenter_state.slots[i].stage_buffer)
-    {
-      c3dDeleteStageBuffer(g_presenter_state.slots[i].stage_buffer);
-      g_presenter_state.slots[i].stage_buffer = NULL;
-    }
-  }
-
-  if (g_presenter_state.wake_event)
-  {
-    CloseHandle(g_presenter_state.wake_event);
-    g_presenter_state.wake_event = NULL;
-  }
-
-  if (g_presenter_state.shutdown_event)
-  {
-    CloseHandle(g_presenter_state.shutdown_event);
-    g_presenter_state.shutdown_event = NULL;
-  }
-
-  DeleteCriticalSection(&g_presenter_state.lock);
-  destroyPresentState(window);
-  ZeroMemory(&g_presenter_state, sizeof(g_presenter_state));
-  TracyCZoneEnd(tracy_zone);
 }
 
 static bool createCheckerTexture(void)
@@ -1136,62 +930,6 @@ static bool pollMessages(void)
   return true;
 }
 
-static void presentToWindow(C3DTexture* texture, const C3DTextureInfo* info)
-{
-  TracyCZoneN(tracy_zone, "presentToWindow", 1);
-  size_t size = info->width * info->height * 4;
-  TracyCPlotI("C3D Present Width", (int64_t)info->width);
-  TracyCPlotI("C3D Present Height", (int64_t)info->height);
-  TracyCPlotI("C3D Present Readback Bytes", (int64_t)size);
-
-  PresentSlot* slot = NULL;
-  {
-    TracyCZoneN(acquire_zone, "presentToWindow.acquireSlot", 1);
-    EnterCriticalSection(&g_presenter_state.lock);
-    for (size_t i = 0; i < _countof(g_presenter_state.slots); ++i)
-    {
-      if (g_presenter_state.slots[i].state == PRESENT_SLOT_FREE)
-      {
-        slot = &g_presenter_state.slots[i];
-        slot->state = PRESENT_SLOT_PRESENTING;
-        slot->info = *info;
-        slot->sequence = ++g_presenter_state.next_sequence;
-        break;
-      }
-    }
-    LeaveCriticalSection(&g_presenter_state.lock);
-    TracyCZoneEnd(acquire_zone);
-  }
-
-  if (!slot)
-  {
-    TracyCZoneN(drop_zone, "presentToWindow.dropFrame", 1);
-    TracyCZoneEnd(drop_zone);
-    TracyCZoneEnd(tracy_zone);
-    return;
-  }
-
-  {
-    TracyCZoneN(readback_zone, "presentToWindow.readbackTexture", 1);
-    bool readback_ok = c3dReadTexture(texture, 0, size, slot->stage_buffer, 0);
-    if (!readback_ok)
-    {
-      EnterCriticalSection(&g_presenter_state.lock);
-      slot->state = PRESENT_SLOT_FREE;
-      LeaveCriticalSection(&g_presenter_state.lock);
-      TracyCZoneEnd(readback_zone);
-      TracyCZoneEnd(tracy_zone);
-      return;
-    }
-    TracyCZoneEnd(readback_zone);
-  }
-  EnterCriticalSection(&g_presenter_state.lock);
-  slot->state = PRESENT_SLOT_READY;
-  LeaveCriticalSection(&g_presenter_state.lock);
-  SetEvent(g_presenter_state.wake_event);
-  TracyCZoneEnd(tracy_zone);
-}
-
 static void updateWindowTitle(HWND window, LARGE_INTEGER now, LARGE_INTEGER frequency)
 {
   TracyCZoneN(tracy_zone, "updateWindowTitle", 1);
@@ -1244,22 +982,17 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR comman
   int window_width = client_rect.right - client_rect.left;
   int window_height = client_rect.bottom - client_rect.top;
 
-  C3DTextureInfo backbufferInfo = {0};
-  backbufferInfo.width = window_width;
-  backbufferInfo.height = window_height;
-  backbufferInfo.format = C3D_TEXTURE_FORMAT_RGBA8;
-  C3DTexture* backbuffer = c3dCreateTexture(&backbufferInfo);
-  if (!backbuffer)
+  C3DSwapchainInfo swapchainInfo = {0};
+  swapchainInfo.width = (size_t)window_width;
+  swapchainInfo.height = (size_t)window_height;
+  swapchainInfo.format = C3D_TEXTURE_FORMAT_RGBA8;
+  swapchainInfo.imageCount = 3;
+  swapchainInfo.presentMode = C3D_PRESENT_MODE_MAILBOX;
+  swapchainInfo.presenter.userData = window;
+  swapchainInfo.presenter.present = presentFrameCallback;
+  C3DSwapchain* swapchain = c3dCreateSwapchain(&swapchainInfo);
+  if (!swapchain)
   {
-    DestroyWindow(window);
-    TracyCZoneEnd(tracy_zone);
-    return 1;
-  }
-
-  if (!initializePresenter(window, backbufferInfo.width, backbufferInfo.height))
-  {
-    c3dDeleteTexture(backbuffer);
-    shutdownPresenter(window);
     DestroyWindow(window);
     TracyCZoneEnd(tracy_zone);
     return 1;
@@ -1284,26 +1017,32 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR comman
     GetClientRect(window, &client_rect);
     int window_width = client_rect.right - client_rect.left;
     int window_height = client_rect.bottom - client_rect.top;
-    if ((window_width != backbufferInfo.width) || (window_height != backbufferInfo.height))
+    if ((size_t)window_width != swapchainInfo.width || (size_t)window_height != swapchainInfo.height)
     {
       TracyCZoneN(resize_zone, "resizeBackbuffer", 1);
-      backbufferInfo.width = window_width;
-      backbufferInfo.height = window_height;
-      TracyCPlotI("C3D Backbuffer Width", backbufferInfo.width);
-      TracyCPlotI("C3D Backbuffer Height", backbufferInfo.height);
-      c3dDeleteTexture(backbuffer);
-      backbuffer = c3dCreateTexture(&backbufferInfo);
-      bool presenter_ok = backbuffer && ensurePresenterSlots(backbufferInfo.width, backbufferInfo.height);
+      swapchainInfo.width = (size_t)window_width;
+      swapchainInfo.height = (size_t)window_height;
+      TracyCPlotI("C3D Backbuffer Width", (int64_t)swapchainInfo.width);
+      TracyCPlotI("C3D Backbuffer Height", (int64_t)swapchainInfo.height);
+      bool resized = c3dResizeSwapchain(swapchain, swapchainInfo.width, swapchainInfo.height);
       TracyCZoneEnd(resize_zone);
-      if (!presenter_ok)
+      if (!resized)
       {
         TracyCZoneEnd(frame_zone);
         break;
       }
     }
 
-    render(backbuffer);
-    presentToWindow(backbuffer, &backbufferInfo);
+    C3DTexture* backbuffer = NULL;
+    if (c3dAcquireNextTexture(swapchain, &backbuffer))
+    {
+      render(backbuffer);
+      if (!c3dPresentSwapchain(swapchain))
+      {
+        TracyCZoneEnd(frame_zone);
+        break;
+      }
+    }
 
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
@@ -1315,8 +1054,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR comman
   }
 
   destroyRenderState();
-  shutdownPresenter(window);
-  c3dDeleteTexture(backbuffer);
+  c3dDeleteSwapchain(swapchain);
+  destroyPresentState();
   DestroyWindow(window);
   TracyCZoneEnd(tracy_zone);
   return 0;

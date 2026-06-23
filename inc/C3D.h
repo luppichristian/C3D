@@ -1,6 +1,7 @@
 #pragma once
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 // Define C3D_IMPORT and C3D_EXPORT
 #if defined(__INTELLISENSE__)
@@ -130,6 +131,52 @@ C3D_API bool c3dFillTexture(C3DTexture* texture, size_t offset, size_t size, voi
 C3D_API bool c3dClearTexture(C3DTexture* texture, void* texel);
 C3D_API bool c3dGetTextureInfo(C3DTexture* texture, C3DTextureInfo* info);
 C3D_API bool c3dResizeTexture(C3DTexture* texture, size_t width, size_t height, size_t depth);
+
+//
+// Swapchain
+//
+
+typedef enum
+{
+  C3D_PRESENT_MODE_FIFO,
+  C3D_PRESENT_MODE_MAILBOX,
+  C3D_PRESENT_MODE_IMMEDIATE,
+} C3DPresentMode;
+
+typedef struct
+{
+  const void* pixels;
+  size_t width;
+  size_t height;
+  size_t rowPitch;
+  C3DTextureFormat format;
+  uint64_t frameId;
+} C3DPresentFrame;
+
+typedef struct
+{
+  void* userData;
+  bool (*present)(void* userData, const C3DPresentFrame* frame);
+} C3DPresenterOps;
+
+typedef struct
+{
+  size_t width;
+  size_t height;
+  C3DTextureFormat format;
+  size_t imageCount;
+  C3DPresentMode presentMode;
+  C3DPresenterOps presenter;
+} C3DSwapchainInfo;
+
+typedef struct C3DSwapchain C3DSwapchain;
+
+C3D_API C3DSwapchain* c3dCreateSwapchain(const C3DSwapchainInfo* info);
+C3D_API bool c3dDeleteSwapchain(C3DSwapchain* swapchain);
+C3D_API bool c3dResizeSwapchain(C3DSwapchain* swapchain, size_t width, size_t height);
+C3D_API bool c3dGetSwapchainInfo(C3DSwapchain* swapchain, C3DSwapchainInfo* info);
+C3D_API bool c3dAcquireNextTexture(C3DSwapchain* swapchain, C3DTexture** texture);
+C3D_API bool c3dPresentSwapchain(C3DSwapchain* swapchain);
 
 //
 // Buffers
