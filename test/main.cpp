@@ -28,6 +28,7 @@ static bool g_error_dialog_shown = false;
 
 static void c3dErrorCallback(C3DErrorID id, const char* desc, C3DErrorLoc loc)
 {
+  TracyCZoneN(tracy_zone, "c3dErrorCallback", 1);
   char buffer[1024];
   wsprintfA(
       buffer,
@@ -44,38 +45,49 @@ static void c3dErrorCallback(C3DErrorID id, const char* desc, C3DErrorLoc loc)
     g_error_dialog_shown = true;
     MessageBoxA(NULL, buffer, "C3D Error", MB_OK | MB_ICONERROR);
   }
+  TracyCZoneEnd(tracy_zone);
 }
 
 static void clearFallback(C3DTexture* texture, uint8_t r, uint8_t g, uint8_t b)
 {
+  TracyCZoneN(tracy_zone, "clearFallback", 1);
   uint8_t clear_color[4] = {r, g, b, 255};
   c3dClearTexture(texture, clear_color);
+  TracyCZoneEnd(tracy_zone);
 }
 
 static bool ensureStageBufferSize(C3DStageBuffer** stage_buffer, size_t size)
 {
+  TracyCZoneN(tracy_zone, "ensureStageBufferSize", 1);
   if (!*stage_buffer)
   {
     C3DStageBufferInfo info = {0};
     info.size = size;
     *stage_buffer = c3dCreateStageBuffer(&info);
-    return *stage_buffer != NULL;
+    bool created = *stage_buffer != NULL;
+    TracyCZoneEnd(tracy_zone);
+    return created;
   }
 
   C3DStageBufferInfo info = {0};
   if (!c3dGetStageBufferInfo(*stage_buffer, &info))
   {
+    TracyCZoneEnd(tracy_zone);
     return false;
   }
 
-  return info.size == size || c3dResizeStageBuffer(*stage_buffer, size);
+  bool resized = info.size == size || c3dResizeStageBuffer(*stage_buffer, size);
+  TracyCZoneEnd(tracy_zone);
+  return resized;
 }
 
 static bool ensureDepthTexture(size_t width, size_t height)
 {
+  TracyCZoneN(tracy_zone, "ensureDepthTexture", 1);
   C3DTextureInfo info = {0};
   if (g_render_state.depth_texture && c3dGetTextureInfo(g_render_state.depth_texture, &info) && info.width == width && info.height == height && info.format == C3D_TEXTURE_FORMAT_DEPTH64)
   {
+    TracyCZoneEnd(tracy_zone);
     return true;
   }
 
@@ -90,11 +102,14 @@ static bool ensureDepthTexture(size_t width, size_t height)
   info.depth = 1;
   info.format = C3D_TEXTURE_FORMAT_DEPTH64;
   g_render_state.depth_texture = c3dCreateTexture(&info);
-  return g_render_state.depth_texture != NULL;
+  bool created = g_render_state.depth_texture != NULL;
+  TracyCZoneEnd(tracy_zone);
+  return created;
 }
 
 static void destroyRenderState(void)
 {
+  TracyCZoneN(tracy_zone, "destroyRenderState", 1);
   if (g_render_state.command_buffer)
   {
     c3dDeleteCommandBuffer(g_render_state.command_buffer);
@@ -156,10 +171,12 @@ static void destroyRenderState(void)
   }
 
   g_render_state.initialized = false;
+  TracyCZoneEnd(tracy_zone);
 }
 
 static bool createCheckerTexture(void)
 {
+  TracyCZoneN(tracy_zone, "createCheckerTexture", 1);
   C3DTextureInfo texture_info = {0};
   texture_info.width = 64;
   texture_info.height = 64;
@@ -168,6 +185,7 @@ static bool createCheckerTexture(void)
   g_render_state.texture = c3dCreateTexture(&texture_info);
   if (!g_render_state.texture)
   {
+    TracyCZoneEnd(tracy_zone);
     return false;
   }
 
@@ -190,22 +208,26 @@ static bool createCheckerTexture(void)
   C3DStageBuffer* stage_buffer = c3dCreateStageBuffer(&stage_info);
   if (!stage_buffer)
   {
+    TracyCZoneEnd(tracy_zone);
     return false;
   }
 
   bool success = c3dWriteStageBuffer(stage_buffer, 0, sizeof(pixels), pixels) && c3dWriteTexture(g_render_state.texture, 0, sizeof(pixels), stage_buffer, 0);
   c3dDeleteStageBuffer(stage_buffer);
+  TracyCZoneEnd(tracy_zone);
   return success;
 }
 
 static bool createQuadBuffers(void)
 {
+  TracyCZoneN(tracy_zone, "createQuadBuffers", 1);
   static const uint16_t quad_indices[] = {0, 1, 2, 3};
   C3DBufferInfo index_info = {0};
   index_info.size = sizeof(quad_indices);
   g_render_state.quad_indices = c3dCreateBuffer(&index_info);
   if (!g_render_state.quad_indices)
   {
+    TracyCZoneEnd(tracy_zone);
     return false;
   }
 
@@ -214,6 +236,7 @@ static bool createQuadBuffers(void)
   C3DStageBuffer* stage_buffer = c3dCreateStageBuffer(&stage_info);
   if (!stage_buffer)
   {
+    TracyCZoneEnd(tracy_zone);
     return false;
   }
 
@@ -221,23 +244,28 @@ static bool createQuadBuffers(void)
   c3dDeleteStageBuffer(stage_buffer);
   if (!success)
   {
+    TracyCZoneEnd(tracy_zone);
     return false;
   }
 
   C3DBufferInfo vertex_info = {0};
   vertex_info.size = sizeof(C3DVertex) * 4;
   g_render_state.quad_vertices = c3dCreateBuffer(&vertex_info);
-  return g_render_state.quad_vertices != NULL;
+  bool created = g_render_state.quad_vertices != NULL;
+  TracyCZoneEnd(tracy_zone);
+  return created;
 }
 
 static bool createLineBuffers(void)
 {
+  TracyCZoneN(tracy_zone, "createLineBuffers", 1);
   static const uint16_t line_indices[] = {0, 1, 2, 3};
   C3DBufferInfo index_info = {0};
   index_info.size = sizeof(line_indices);
   g_render_state.line_indices = c3dCreateBuffer(&index_info);
   if (!g_render_state.line_indices)
   {
+    TracyCZoneEnd(tracy_zone);
     return false;
   }
 
@@ -246,6 +274,7 @@ static bool createLineBuffers(void)
   C3DStageBuffer* stage_buffer = c3dCreateStageBuffer(&stage_info);
   if (!stage_buffer)
   {
+    TracyCZoneEnd(tracy_zone);
     return false;
   }
 
@@ -253,13 +282,16 @@ static bool createLineBuffers(void)
   c3dDeleteStageBuffer(stage_buffer);
   if (!success)
   {
+    TracyCZoneEnd(tracy_zone);
     return false;
   }
 
   C3DBufferInfo vertex_info = {0};
   vertex_info.size = sizeof(C3DVertex) * 4;
   g_render_state.line_vertices = c3dCreateBuffer(&vertex_info);
-  return g_render_state.line_vertices != NULL;
+  bool created = g_render_state.line_vertices != NULL;
+  TracyCZoneEnd(tracy_zone);
+  return created;
 }
 
 static bool initializeRenderState(void)
@@ -447,7 +479,7 @@ static void render(C3DTexture* texture)
     return;
   }
 
-  C3DTextureBinding binding = {0};
+  C3DTextureBinding binding = {};
   binding.sampler = C3D_SAMPLER_LINEAR_WRAP;
   binding.texture = g_render_state.texture;
 
@@ -469,7 +501,7 @@ static void render(C3DTexture* texture)
     return;
   }
 
-  C3DDrawInfo quad_draw = {0};
+  C3DDrawInfo quad_draw = {};
   quad_draw.topology = C3D_TOPOLOGY_QUAD;
   quad_draw.indexSize = C3D_INDEX_SIZE_16;
   quad_draw.indexBuffer = g_render_state.quad_indices;
@@ -487,7 +519,7 @@ static void render(C3DTexture* texture)
     return;
   }
 
-  C3DDrawInfo line_draw = {0};
+  C3DDrawInfo line_draw = {};
   line_draw.topology = C3D_TOPOLOGY_LINE;
   line_draw.indexSize = C3D_INDEX_SIZE_16;
   line_draw.indexBuffer = g_render_state.line_indices;
@@ -530,6 +562,7 @@ static LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wparam, LPA
 
 static HWND openWindow(HINSTANCE instance, int show_command)
 {
+  TracyCZoneN(tracy_zone, "openWindow", 1);
   WNDCLASSA window_class = {0};
   window_class.lpfnWndProc = windowProc;
   window_class.hInstance = instance;
@@ -537,6 +570,7 @@ static HWND openWindow(HINSTANCE instance, int show_command)
   window_class.style = CS_HREDRAW | CS_VREDRAW | CS_OWNDC;
   if (!RegisterClassA(&window_class))
   {
+    TracyCZoneEnd(tracy_zone);
     return NULL;
   }
 
@@ -555,20 +589,29 @@ static HWND openWindow(HINSTANCE instance, int show_command)
       0);
 
   if (!window)
+  {
+    TracyCZoneEnd(tracy_zone);
     return NULL;
+  }
 
   ShowWindow(window, show_command);
   UpdateWindow(window);
+  TracyCZoneEnd(tracy_zone);
   return window;
 }
 
 static bool pollMessages(void)
 {
+  TracyCZoneN(tracy_zone, "pollMessages", 1);
   MSG message;
+  int32_t message_count = 0;
   while (PeekMessageA(&message, 0, 0, 0, PM_REMOVE))
   {
+    ++message_count;
     if (message.message == WM_QUIT)
     {
+      TracyCPlotI("C3D Message Count", message_count);
+      TracyCZoneEnd(tracy_zone);
       return false;
     }
 
@@ -576,6 +619,8 @@ static bool pollMessages(void)
     DispatchMessageA(&message);
   }
 
+  TracyCPlotI("C3D Message Count", message_count);
+  TracyCZoneEnd(tracy_zone);
   return true;
 }
 
@@ -635,6 +680,7 @@ static void presentToWindow(HWND window, C3DTexture* texture, const C3DTextureIn
 
 static void updateWindowTitle(HWND window, LARGE_INTEGER now, LARGE_INTEGER frequency)
 {
+  TracyCZoneN(tracy_zone, "updateWindowTitle", 1);
   static LARGE_INTEGER last_title_update = {0};
   static uint32_t frame_count = 0;
 
@@ -642,26 +688,31 @@ static void updateWindowTitle(HWND window, LARGE_INTEGER now, LARGE_INTEGER freq
   if (!last_title_update.QuadPart)
   {
     last_title_update = now;
+    TracyCZoneEnd(tracy_zone);
     return;
   }
 
   double elapsed_seconds = (double)(now.QuadPart - last_title_update.QuadPart) / (double)frequency.QuadPart;
   if (elapsed_seconds < 1.0)
   {
+    TracyCZoneEnd(tracy_zone);
     return;
   }
 
   char title[64];
   double fps = (double)frame_count / elapsed_seconds;
+  TracyCPlotI("C3D FPS", (int64_t)(fps * 100.0));
   snprintf(title, sizeof(title), "C3D Test - %.1f FPS", fps);
   SetWindowTextA(window, title);
 
   frame_count = 0;
   last_title_update = now;
+  TracyCZoneEnd(tracy_zone);
 }
 
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR command_line, int show_command)
 {
+  TracyCZoneN(tracy_zone, "WinMain", 1);
   (void)previous_instance;
   (void)command_line;
 
@@ -670,6 +721,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR comman
   HWND window = openWindow(instance, show_command);
   if (!window)
   {
+    TracyCZoneEnd(tracy_zone);
     return 1;
   }
 
@@ -683,15 +735,25 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR comman
   backbufferInfo.height = window_height;
   backbufferInfo.format = C3D_TEXTURE_FORMAT_RGBA8;
   C3DTexture* backbuffer = c3dCreateTexture(&backbufferInfo);
+  if (!backbuffer)
+  {
+    DestroyWindow(window);
+    TracyCZoneEnd(tracy_zone);
+    return 1;
+  }
   LARGE_INTEGER performance_frequency;
   QueryPerformanceFrequency(&performance_frequency);
+  LARGE_INTEGER last_frame_counter;
+  QueryPerformanceCounter(&last_frame_counter);
 
   bool running = true;
   while (running)
   {
+    TracyCZoneN(frame_zone, "frame", 1);
     TracyCFrameMark;
     if (!pollMessages())
     {
+      TracyCZoneEnd(frame_zone);
       break;
     }
 
@@ -701,10 +763,19 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR comman
     int window_height = client_rect.bottom - client_rect.top;
     if ((window_width != backbufferInfo.width) || (window_height != backbufferInfo.height))
     {
+      TracyCZoneN(resize_zone, "resizeBackbuffer", 1);
       backbufferInfo.width = window_width;
       backbufferInfo.height = window_height;
+      TracyCPlotI("C3D Backbuffer Width", backbufferInfo.width);
+      TracyCPlotI("C3D Backbuffer Height", backbufferInfo.height);
       c3dDeleteTexture(backbuffer);
       backbuffer = c3dCreateTexture(&backbufferInfo);
+      TracyCZoneEnd(resize_zone);
+      if (!backbuffer)
+      {
+        TracyCZoneEnd(frame_zone);
+        break;
+      }
     }
 
     render(backbuffer);
@@ -712,11 +783,16 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR comman
 
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
+    double frame_seconds = (double)(now.QuadPart - last_frame_counter.QuadPart) / (double)performance_frequency.QuadPart;
+    TracyCPlotI("C3D Frame Time (us)", (int64_t)(frame_seconds * 1000000.0));
+    last_frame_counter = now;
     updateWindowTitle(window, now, performance_frequency);
+    TracyCZoneEnd(frame_zone);
   }
 
   destroyRenderState();
   c3dDeleteTexture(backbuffer);
   DestroyWindow(window);
+  TracyCZoneEnd(tracy_zone);
   return 0;
 }

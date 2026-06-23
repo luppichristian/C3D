@@ -25,18 +25,18 @@ filter(
   debug-profile
   opt_level(debug)
   warning_level(high)
-  defines(C3D_EXPORT_LIB TRACY_ENABLE)
+  defines(TRACY_ENABLE TRACY_IMPORTS)
 )
 
 filter(
   release-profile
   opt_level(speed_3)
   warning_level(medium)
-  defines(C3D_EXPORT_LIB TRACY_ENABLE)
+  defines(TRACY_ENABLE TRACY_IMPORTS)
 )
 
 targets(
-  static_lib(
+  dyn_lib(
     id(tracy_client)
     lang(cpp)
     repo(
@@ -44,6 +44,9 @@ targets(
       tag("v0.13.1")
     )
     cmake_target(TracyClient)
+    cmake_option("BUILD_SHARED_LIBS=ON")
+    cmake_option("CMAKE_POLICY_DEFAULT_CMP0077=NEW")
+    cmake_option("TRACY_STATIC=OFF")
   )
 
   dyn_lib(
