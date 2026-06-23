@@ -16,6 +16,8 @@ The repo also includes a Windows demo in `test/main.cpp` that renders into a CUD
 
 ![C3D demo render](assets/render.png)
 
+Several write and render-path calls also support internal object cycling through the `cycle` flags. The behavior is intended to work like SDL_gpu: the API can rotate to a fresh internal backing resource to avoid stomping data that may still be in flight on the GPU.
+
 ## Why I Built This
 
 I built C3D to experiment with a graphics API shape without depending on a full native graphics stack like Direct3D, Vulkan, or OpenGL.
